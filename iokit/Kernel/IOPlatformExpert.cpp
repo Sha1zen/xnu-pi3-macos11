@@ -2281,14 +2281,18 @@ OSDefineMetaClassAndStructors(IOPanicPlatform, IOPlatformExpert);
 bool
 IOPanicPlatform::start(IOService * provider)
 {
-	const char * platform_name = "(unknown platform name)";
-
-	if (provider) {
-		platform_name = provider->getName();
-	}
-
-	panic("Unable to find driver for this platform: \"%s\".\n",
-	    platform_name);
-
+	/*
+	 * TEMP DIAGNOSTIC / COMPAT: no concrete BCM2837/generic-ARM
+	 * IOPlatformExpert subclass exists in this bare, non-prelinked
+	 * kernel Mach-O (no kexts are loaded), so this catch-all is always
+	 * structurally reached on this board regardless of DT/loader
+	 * correctness. The known-good NSG650 precompiled reference kernel
+	 * for this exact xnu-7195 vintage carries the equivalent fix as a
+	 * binary patch (neutering this tail to a plain `return false`) -
+	 * see project memory. Applying the same fix as a real source
+	 * change here: returning false is the normal, well-defined IOKit
+	 * "no driver claimed this" outcome, not a special case.
+	 */
+	(void)provider;
 	return false;
 }

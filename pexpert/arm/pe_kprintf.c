@@ -12,6 +12,7 @@
 #include <kern/simple_lock.h>
 #include <os/log_private.h>
 #include <libkern/section_keywords.h>
+#include <kern/startup.h>
 
 /* Globals */
 typedef void (*PE_kputc_t)(char);
@@ -125,11 +126,30 @@ kprintf(const char *fmt, ...)
 		ml_set_interrupts_enabled(state);
 		va_end(listp);
 
-		os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, listp2, caller);
+		/* TEMP DIAGNOSTIC / COMPAT FIX: os_log_with_args() unconditionally
+		 * routes into the firehose kernel-tracing backend, which on real
+		 * Apple hardware can rely on a bootloader-provided "preoslog" DT
+		 * carve-out (see sysctl_debug_get_preoslog() in osfmk/kern/
+		 * debug.c) to safely buffer log lines before STARTUP_SUB_OSLOG
+		 * actually runs. This board's minimal ADT has no such node, so
+		 * before STARTUP_SUB_OSLOG the firehose write path dereferences
+		 * an uninitialized buffer and faults - fatal here specifically
+		 * because it's kprintf() itself, called from panic()'s own
+		 * message-printing path (debugger_collect_diagnostics() ->
+		 * kprintf("Debugger called...")), so the resulting fault re-enters
+		 * panic() and recurses until stack overflow, masking whatever the
+		 * real panic was (see project memory, "Bug #6"). startup_phase is
+		 * the real, already-exported readiness flag for exactly this -
+		 * just never checked at this call site. */
+		if (startup_phase >= STARTUP_SUB_OSLOG) {
+			os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, listp2, caller);
+		}
 		va_end(listp2);
 	} else {
 		va_start(listp, fmt);
-		os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, listp, caller);
+		if (startup_phase >= STARTUP_SUB_OSLOG) {
+			os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, listp, caller);
+		}
 		va_end(listp);
 	}
 }

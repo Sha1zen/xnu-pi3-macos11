@@ -296,6 +296,24 @@ random_cpu_init(int cpu)
 void
 read_random(void * buffer, u_int numbytes)
 {
+	/*
+	 * TEMP DIAGNOSTIC / COMPAT: on real hardware, register_and_init_prng()
+	 * is called from the (closed-source) corecrypto kext's own
+	 * initialization, which normally runs well before kernel_bootstrap_thread
+	 * reaches startup.c's vm_kernel_addrperm setup (the first real caller
+	 * of read_random()). This bare from-source kernel never loads that
+	 * kext (or any kext), so prng_funcs/prng_ctx are never populated and
+	 * prng_ready stays 0 - the unconditional prng_funcs.refresh() call
+	 * below was a genuine null-function-pointer call (PC=0 jump) in that
+	 * case. read_erandom() right above already has the correct pattern
+	 * for this (falls back to the self-contained early-boot DRBG when
+	 * !prng_ready) - mirror it here instead of assuming the kernel PRNG
+	 * is always installed by this point. See project memory bug #7.
+	 */
+	if (!prng_ready) {
+		read_erandom(buffer, numbytes);
+		return;
+	}
 	prng_funcs.refresh(prng_ctx);
 	read_random_generate(buffer, numbytes);
 }

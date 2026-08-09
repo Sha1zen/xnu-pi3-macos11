@@ -1438,6 +1438,35 @@ oslog_is_safe(void)
 	       ml_get_interrupts_enabled() == TRUE;
 }
 
+/*
+ * TEMP DIAGNOSTIC / COMPAT: libkern/os/log.c's _os_log_with_args_internal()
+ * treats any os_log call before STARTUP_SUB_EARLY_BOOT as unconditionally
+ * "safe" to route to firehose, regardless of oslog_is_safe()'s real checks
+ * (kernel_debugger_entry_count/not_in_kdp/preemption/interrupts). That's
+ * correct on real Apple hardware, where iBoot always populates a
+ * "preoslog" DT carve-out valid from the very first instruction XNU
+ * executes, so firehose can safely write into it that early. This board's
+ * minimal ADT has no such node (see project memory bug #6/#7), so that
+ * assumption doesn't hold - without this check, a firehose write attempt
+ * during genuinely early boot (e.g. from panic()'s own self-triggered
+ * TRAP_DEBUGGER handling, itself called before STARTUP_SUB_EARLY_BOOT)
+ * faults, which recursively re-panics until the interrupt stack overflows.
+ * IODTGetLoaderInfo() is a read-only DT lookup, safe to call repeatedly;
+ * cached after first call since the DT doesn't change at runtime.
+ */
+boolean_t
+oslog_early_boot_safe(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		void *preoslog_pa = NULL;
+		int preoslog_size = 0;
+		cached = (IODTGetLoaderInfo("preoslog", &preoslog_pa, &preoslog_size) == 0 &&
+		    preoslog_pa != NULL && preoslog_size != 0) ? 1 : 0;
+	}
+	return (boolean_t)cached;
+}
+
 boolean_t
 debug_mode_active(void)
 {

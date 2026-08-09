@@ -235,7 +235,13 @@ _os_log_with_args_internal(os_log_t oslog, os_log_type_t type,
 	}
 
 	/* early boot can log to dmesg for later replay (27307943) */
-	safe = (startup_phase < STARTUP_SUB_EARLY_BOOT || oslog_is_safe());
+	/* TEMP DIAGNOSTIC / COMPAT: the early-boot escape hatch below assumes
+	 * a real iBoot-populated "preoslog" DT carve-out is already valid,
+	 * which isn't true on this board - see oslog_early_boot_safe() in
+	 * osfmk/kern/debug.c and project memory bug #6/#7. Without gating on
+	 * it, this falls through to firehose during genuinely unsafe early
+	 * boot and crashes. */
+	safe = (startup_phase < STARTUP_SUB_EARLY_BOOT && oslog_early_boot_safe()) || oslog_is_safe();
 
 	if (logging_config & ATM_TRACE_DISABLE || logging_config & ATM_TRACE_OFF) {
 		logging = false;

@@ -105,6 +105,10 @@ extern void arm64_retention_wfi(void);
 
 vm_address_t   start_cpu_paddr;
 
+/* TEMP DIAGNOSTIC: see cpu_start() below. */
+volatile unsigned long diag_cpu_start_cpu_id;
+volatile boolean_t diag_cpu_start_called;
+
 sysreg_restore_t sysreg_restore __attribute__((section("__DATA, __const"))) = {
 	.tcr_el1 = TCR_EL1_BOOT,
 };
@@ -863,6 +867,12 @@ cpu_start(int cpu)
 			break;
 		}
 #endif
+		/* TEMP DIAGNOSTIC: latch the raw cpu_id value about to be
+		 * reinterpret-cast to an IOCPU* by PE_cpu_start() (IOCPU.cpp,
+		 * !USE_APPLEARMSMP branch) - see project memory "Bug #7"
+		 * investigation. volatile: LTO dead-strips otherwise. */
+		diag_cpu_start_cpu_id = (unsigned long)cpu_data_ptr->cpu_id;
+		diag_cpu_start_called = TRUE;
 		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
 	}
 

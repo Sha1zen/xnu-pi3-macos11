@@ -574,6 +574,7 @@ struct additional_panic_data_buffer {
 extern struct additional_panic_data_buffer *panic_data_buffers;
 
 boolean_t oslog_is_safe(void);
+boolean_t oslog_early_boot_safe(void);
 boolean_t debug_mode_active(void);
 boolean_t stackshot_active(void);
 void panic_stackshot_reset_state(void);

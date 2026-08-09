@@ -27,8 +27,17 @@
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs]
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
-#  FILESYS_DEV =    [ FILESYS_BASE fdesc mockfs ]
-#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc mockfs ]
+#  FILESYS_DEV =    [ FILESYS_BASE fdesc mockfs msdosfs ]
+#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc mockfs msdosfs ]
+#  TEMP DIAGNOSTIC: "hfs" deliberately left out for now - all 37 bsd/hfs/*
+#  files + their bsd/conf/files "optional hfs" entries are fully vendored
+#  and ready, but SETUP/config's ancient doconf/mkmakefile tool silently
+#  drops ~10 of the 37 files from the generated Makefile's OBJS link
+#  variable (files exist, .o's compile fine, just never make it into the
+#  final link - confirmed via a from-scratch Makefile regeneration, not a
+#  cache issue) - real bug in 1980s-vintage tooling, not yet root-caused.
+#  Re-add "hfs" here once that's fixed. See project memory / this session's
+#  history for the investigation so far.
 #  NFS_DEV =        [ nfsclient nfsserver config_nfs_gss ]
 #  NFS_RELEASE =    [ nfsclient ]
 #  NFS_DEBUG =      [ nfsclient config_nfs_gss ]

@@ -58,6 +58,9 @@
 #include <IOKit/IOLib.h>
 
 // score < 0 means "don't set IOProbeScore, use kIODefaultProbeScore".
+// nameMatch == NULL means "don't set IONameMatch, match by class alone" -
+// needed for drivers like IOBlockStorageDriver that attach generically to
+// any matching provider class rather than a specific named DT node.
 static OSDictionary *
 makePersonality(const char *providerClass, const char *ioClass, const char *nameMatch, int score)
 {
@@ -68,10 +71,11 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 
 	OSString *providerClassStr = OSString::withCString(providerClass);
 	OSString *classStr = OSString::withCString(ioClass);
-	OSString *nameMatchStr = OSString::withCString(nameMatch);
+	OSString *nameMatchStr = (nameMatch != NULL) ? OSString::withCString(nameMatch) : NULL;
 	OSNumber *scoreNum = (score >= 0) ? OSNumber::withNumber(score, 32) : NULL;
 
-	if (providerClassStr == NULL || classStr == NULL || nameMatchStr == NULL ||
+	if (providerClassStr == NULL || classStr == NULL ||
+	    (nameMatch != NULL && nameMatchStr == NULL) ||
 	    (score >= 0 && scoreNum == NULL)) {
 		OSSafeReleaseNULL(providerClassStr);
 		OSSafeReleaseNULL(classStr);
@@ -83,7 +87,10 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 
 	dict->setObject(kIOProviderClassKey, providerClassStr);
 	dict->setObject(kIOClassKey, classStr);
-	dict->setObject(kIONameMatchKey, nameMatchStr);
+	if (nameMatchStr != NULL) {
+		dict->setObject(kIONameMatchKey, nameMatchStr);
+		nameMatchStr->release();
+	}
 	if (scoreNum != NULL) {
 		dict->setObject(kIOProbeScoreKey, scoreNum);
 		scoreNum->release();
@@ -91,7 +98,6 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 
 	providerClassStr->release();
 	classStr->release();
-	nameMatchStr->release();
 
 	return dict;
 }
@@ -99,7 +105,7 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 extern "C" void
 BCM2837RegisterBuiltinPersonalities(void)
 {
-	OSArray *personalities = OSArray::withCapacity(5);
+	OSArray *personalities = OSArray::withCapacity(6);
 	if (personalities == NULL) {
 		IOLog("BCM2837RegisterBuiltinPersonalities: OSArray::withCapacity failed\n");
 		return;
@@ -124,6 +130,22 @@ BCM2837RegisterBuiltinPersonalities(void)
 	OSDictionary *armio = makePersonality("IOPlatformDevice", "BCM2837ArmIO", "arm-io", -1);
 	OSDictionary *intc = makePersonality("IOPlatformDevice", "BCM2837InterruptController", "intc", -1);
 	OSDictionary *sdhci = makePersonality("IOPlatformDevice", "BCM2837SDHCI", "sdhci", -1);
+	// IOBlockStorageDriver (real apple-oss-distributions/IOStorageFamily,
+	// vendored into iokit/Storage/ and iokit/IOKit/storage/, matching
+	// vintage IOStorageFamily-218.1.4 - the initially-vendored 337.100.1
+	// used IOMallocType(), a newer API this xnu-7195 tree doesn't have)
+	// matches generically against *any* IOBlockStorageDevice, no
+	// IONameMatch - same as real macOS's own IOStorageFamily kext
+	// personality. Publishes the whole-disk IOMedia a filesystem (msdosfs)
+	// can mount directly, superfloppy-style - no partition scheme wired up
+	// yet (see docs/sd-and-ethernet-plan.md's sequencing; deliberately out
+	// of scope for the first proof-of-concept boot).
+	OSDictionary *blockStorageDriver = makePersonality("IOBlockStorageDevice", "IOBlockStorageDriver", NULL, -1);
+	// IOMediaBSDClient matches generically against any IOMedia and creates
+	// its /dev/diskN block+character device nodes - needed for BSD-level
+	// device lookup (IOFindBSDRoot()/mountroot, "rd=disk0" boot-args) to
+	// find our whole-disk IOMedia at all.
+	OSDictionary *mediaBSDClient = makePersonality("IOMedia", "IOMediaBSDClient", NULL, -1);
 
 	if (root != NULL) {
 		personalities->setObject(root);
@@ -144,6 +166,10 @@ BCM2837RegisterBuiltinPersonalities(void)
 	if (sdhci != NULL) {
 		personalities->setObject(sdhci);
 		sdhci->release();
+	}
+	if (blockStorageDriver != NULL) {
+		personalities->setObject(blockStorageDriver);
+		blockStorageDriver->release();
 	}
 
 	IOLog("BCM2837RegisterBuiltinPersonalities: built %u personalities, gIOCatalogue=%p\n",

@@ -93,12 +93,7 @@
  * @abstract A character string used for nub matching.
  */
 #define	kIOBlockStorageDeviceTypeGeneric	"Generic"
-/*!
- * @defined kIOBlockStorageDeviceTDMLocked
- * @abstract A boolean property to tell if device is connected through TDM, and not
- * authenticated yet
- */
-#define	kIOBlockStorageDeviceTDMLocked		"AppleTDMLocked"
+
 /*!
  * @struct IOBlockStorageDeviceExtent
  * @abstract
@@ -160,7 +155,7 @@ struct IOBlockStorageProvisionDeviceExtent
  * is responsible for instantiating the Nub.
  */
 
-class __exported IOBlockStorageDevice : public IOService {
+class IOBlockStorageDevice : public IOService {
 
     OSDeclareAbstractStructors(IOBlockStorageDevice)
     
@@ -227,9 +222,9 @@ public:
     virtual UInt32	doGetFormatCapacities(UInt64 * capacities,
                                             UInt32   capacitiesMaxCount) const	= 0;
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn	doLockUnlockMedia(bool doLock) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     virtual IOReturn	doSynchronizeCache(void) __attribute__ ((deprecated));
 
@@ -290,9 +285,9 @@ public:
      */
     virtual IOReturn	reportEjectability(bool *isEjectable)	= 0;
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn	reportLockability(bool *isLockable) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     /*!
      * @function reportMaxValidBlock
@@ -321,10 +316,10 @@ public:
      */
     virtual IOReturn	reportMediaState(bool *mediaPresent,bool *changedState = 0)	= 0;
     
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn	reportPollRequirements(bool *pollRequired,
                                             bool *pollIsExpensive) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
     
     /*!
      * @function reportRemovability
@@ -409,9 +404,9 @@ public:
      */
     virtual IOReturn	requestIdle(void);
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn doDiscard(UInt64 block, UInt64 nblks) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     /*!
      * @function doUnmap

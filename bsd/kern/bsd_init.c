@@ -515,6 +515,7 @@ bsd_early_init(void)
 void
 bsd_init(void)
 {
+	printf("TEMP DIAGNOSTIC: bsd_init() entered\n");
 	struct uthread *ut;
 	unsigned int i;
 	struct vfs_context context;
@@ -815,6 +816,21 @@ bsd_init(void)
 	bsd_init_kprintf("calling vfsinit\n");
 	vfsinit();
 
+#if HFS
+	/* HFS+ registers itself dynamically via vfs_fsadd() (real hfs.kext's
+	 * own mechanism, see bsd/hfs/hfs_vfsinit.c) rather than through the
+	 * static vfstbllist[]/bsd/vfs/vfs_conf.c table vfsinit() just walked -
+	 * needs its own explicit call, once VFS is up and before root-mount
+	 * is attempted. */
+	{
+		extern int hfs_vfsinit(void);
+		int hfs_init_err = hfs_vfsinit();
+		if (hfs_init_err) {
+			printf("hfs_vfsinit failed: %d\n", hfs_init_err);
+		}
+	}
+#endif
+
 	/* Initialize file locks. */
 	bsd_init_kprintf("calling lf_init\n");
 	lf_init();
@@ -1022,9 +1038,12 @@ bsd_init(void)
 #endif
 
 		bsd_init_kprintf("vfs_mountroot\n");
+		printf("TEMP DIAGNOSTIC: calling vfs_mountroot()\n");
 		if (0 == (err = vfs_mountroot())) {
+			printf("TEMP DIAGNOSTIC: vfs_mountroot() succeeded\n");
 			break;
 		}
+		printf("TEMP DIAGNOSTIC: vfs_mountroot() failed, err=%d\n", err);
 		rootdevice[0] = '\0';
 #if CONFIG_NETBOOT
 		if (netboot) {

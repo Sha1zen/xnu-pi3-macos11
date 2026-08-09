@@ -124,6 +124,8 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
 #	4.4 filesystems
 #
 options		MOCKFS		# Boot from an executable	# <mockfs>
+options		MSDOSFS		# FAT12/16/32 support		# <msdosfs>
+options		HFS		# HFS+ built-in filesystem	# <hfs>
 options		FIFO		# fifo support			# <fifo>
 options		FDESC		# fdesc_fs support		# <fdesc>
 options		DEVFS		# devfs support			# <devfs>

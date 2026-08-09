@@ -120,23 +120,6 @@
 
 #define kIOStorageFeatureUnmap "Unmap"
 
-/*!
- * @enum IOStorageUnmapOptions
- * @discussion
- * Options for unmap storage requests.
- * @constant kIOStorageUnmapOptionWhole
- * Issue a single extent only.
- */
-
-enum
-{
-    kIOStorageUnmapOptionNone       = 0x00000000,
-    kIOStorageUnmapOptionWhole      = 0x00000001,
-    kIOStorageUnmapOptionReserved   = 0xFFFFFFFE
-};
-
-typedef UInt32 IOStorageUnmapOptions;
-
 #ifdef KERNEL
 #ifdef __cplusplus
 
@@ -157,30 +140,21 @@ typedef UInt32 IOStorageUnmapOptions;
  * No access is requested; should not be passed to open().
  * @constant kIOStorageAccessReader
  * Read-only access is requested.
- * @constant kIOStorageAccessWriter
- * write-only access is requested.
  * @constant kIOStorageAccessReaderWriter
  * Read and write access is requested.
  * @constant kIOStorageAccessSharedLock
  * Shared access is requested.
  * @constant kIOStorageAccessExclusiveLock
  * Exclusive access is requested.
- * @constant kIOStorageAccessInvalid
- * Invalid access is requested.
- * @constant kIOStorageAccessReserved
- * Reserved Access.
  */
 
 enum
 {
     kIOStorageAccessNone          = 0x00,
     kIOStorageAccessReader        = 0x01,
-    kIOStorageAccessWriter        = 0x02,
     kIOStorageAccessReaderWriter  = 0x03,
     kIOStorageAccessSharedLock    = 0x04,
-    kIOStorageAccessExclusiveLock = 0x08,
-    kIOStorageAccessInvalid       = 0x0D,
-    kIOStorageAccessReserved      = 0xFFFFFFF0
+    kIOStorageAccessExclusiveLock = 0x08
 };
 
 typedef UInt32 IOStorageAccess;
@@ -254,6 +228,19 @@ enum
 typedef UInt32 IOStorageSynchronizeOptions;
 
 /*!
+ * @enum IOStorageUnmapOptions
+ * @discussion
+ * Options for unmap storage requests.
+ */
+
+enum
+{
+    kIOStorageUnmapOptionReserved = 0xFFFFFFFF
+};
+
+typedef UInt32 IOStorageUnmapOptions;
+
+/*!
  * @struct IOStorageAttributes
  * @discussion
  * Attributes of read and write storage requests.
@@ -272,7 +259,7 @@ struct IOStorageAttributes
     UInt8             reserved0024;
     UInt32            reserved0032;
     UInt64            reserved0064;
-    SInt64            adjustedOffset;
+    UInt64            adjustedOffset;
     bufattr_t         bufattr;
 };
 
@@ -381,7 +368,7 @@ struct IOStorageCompletion
  * versions implemented in the subclass.
  */
 
-class __exported IOStorage : public IOService
+class IOStorage : public IOService
 {
     OSDeclareAbstractStructors(IOStorage);
 
@@ -446,9 +433,9 @@ protected:
 
 public:
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual bool attach(IOService * provider) APPLE_KEXT_OVERRIDE;
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     /*!
      * @function complete
@@ -545,9 +532,9 @@ public:
                            IOStorageAttributes * attributes      = 0,
                            UInt64 *              actualByteCount = 0);
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn synchronizeCache(IOService * client) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     /*!
      * @function read
@@ -611,11 +598,11 @@ public:
                        IOStorageAttributes * attributes,
                        IOStorageCompletion * completion) = 0;
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn discard(IOService * client,
                              UInt64      byteStart,
                              UInt64      byteCount) __attribute__ ((deprecated));
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
     /*!
      * @function unmap
@@ -634,17 +621,17 @@ public:
      * Returns the status of the operation.
      */
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn unmap(IOService *           client,
                            IOStorageExtent *     extents,
                            UInt32                extentsCount,
                            IOStorageUnmapOptions options = 0); /* 10.6.6 */
-#else /* !TARGET_OS_OSX */
+#else /* !TARGET_OS_OSX || !defined(__x86_64__) */
     virtual IOReturn unmap(IOService *           client,
                            IOStorageExtent *     extents,
                            UInt32                extentsCount,
                            IOStorageUnmapOptions options = 0) = 0;
-#endif /* !TARGET_OS_OSX */
+#endif /* !TARGET_OS_OSX || !defined(__x86_64__) */
 
     /*!
      * @function lockPhysicalExtents
@@ -731,17 +718,17 @@ public:
      * Returns the status of the synchronization.
      */
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
     virtual IOReturn synchronize(IOService *                 client,
                                  UInt64                      byteStart,
                                  UInt64                      byteCount,
                                  IOStorageSynchronizeOptions options = 0); /* 10.11.0 */
-#else /* !TARGET_OS_OSX */
+#else /* !TARGET_OS_OSX || !defined(__x86_64__) */
     virtual IOReturn synchronize(IOService *                 client,
                                  UInt64                      byteStart,
                                  UInt64                      byteCount,
                                  IOStorageSynchronizeOptions options = 0) = 0;
-#endif /* !TARGET_OS_OSX */
+#endif /* !TARGET_OS_OSX || !defined(__x86_64__) */
 
     /*!
      * @function getProvisionStatus
@@ -789,13 +776,12 @@ public:
     OSMetaClassDeclareReservedUnused(IOStorage, 15);
 };
 
-
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX && defined(__x86_64__)
 #ifdef KERNEL_PRIVATE
 #define _kIOStorageSynchronizeOption_super__synchronizeCache 0xFFFFFFFF
 #define _respondsTo_synchronizeCache ( IOStorage::_expansionData )
 #endif /* KERNEL_PRIVATE */
-#endif /* TARGET_OS_OSX */
+#endif /* TARGET_OS_OSX && defined(__x86_64__) */
 
 #endif /* __cplusplus */
 #endif /* KERNEL */

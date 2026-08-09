@@ -39,6 +39,9 @@ iokit/Kernel/IOStartIOKit.cpp				optional iokitcpp
 
 iokit/Storage/IOStorage.cpp				optional iokitcpp
 iokit/Storage/IOBlockStorageDevice.cpp			optional iokitcpp
+iokit/Storage/IOMedia.cpp				optional iokitcpp
+iokit/Storage/IOBlockStorageDriver.cpp			optional iokitcpp
+iokit/Storage/IOMediaBSDClient.cpp			optional iokitcpp
 
 iokit/Drivers/BCM2837/BCM2837InterruptController.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp

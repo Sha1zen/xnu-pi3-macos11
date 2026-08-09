@@ -468,9 +468,27 @@ arm_init(
 	 * PE_state.video.v_display to pick kPEGraphicsMode vs. kPETextMode.
 	 * Must run after arm_vm_init() (ml_io_map() needs VM/pmap
 	 * bootstrapped) and before PE_create_console(). On any failure this
-	 * just leaves PE_state.video zeroed, identical to not calling it. */
-	extern boolean_t bcm2837_video_init(PE_Video *video);
-	bcm2837_video_init(&PE_state.video);
+	 * just leaves PE_state.video zeroed, identical to not calling it.
+	 *
+	 * Gated behind the "hdmi_console" boot-arg, default off: the mailbox
+	 * handshake itself succeeds (real framebuffer address obtained), but
+	 * with a real screen attached (-display cocoa) it shows blank -
+	 * something past this point (vc_* paint ops, pixel format/pitch, or
+	 * the QEMU framebuffer device itself) isn't right yet, and that's
+	 * unverified/shelved for now. Since v_display=1 unconditionally
+	 * steers PE_create_console() to kPEGraphicsMode, leaving this on
+	 * silently sends all kprintf/printf console output to that (not
+	 * currently working) framebuffer instead of serial, which broke
+	 * headless dev - see project memory ("console output gap"). Default
+	 * off restores serial console for normal development; pass
+	 * "hdmi_console=1" on the QEMU -append line to re-enable and debug
+	 * the framebuffer path later. */
+	unsigned int hdmi_console_boot_arg = 0;
+	PE_parse_boot_argn("hdmi_console", &hdmi_console_boot_arg, sizeof(hdmi_console_boot_arg));
+	if (hdmi_console_boot_arg) {
+		extern boolean_t bcm2837_video_init(PE_Video *video);
+		bcm2837_video_init(&PE_state.video);
+	}
 
 	if (debug_boot_arg) {
 		patch_low_glo();

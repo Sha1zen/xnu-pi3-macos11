@@ -67,7 +67,7 @@ MACHINE_FLAGS_ARM_T8002 = -DARM_BOARD_CONFIG_T8002
 MACHINE_FLAGS_ARM_T8004 = -DARM_BOARD_CONFIG_T8004
 MACHINE_FLAGS_ARM64_T8010 = -DARM64_BOARD_CONFIG_T8010 -mcpu=hurricane
 MACHINE_FLAGS_ARM64_T8011 = -DARM64_BOARD_CONFIG_T8011 -mcpu=hurricane
-MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837 -mcpu=cortex-a53
 MACHINE_FLAGS_ARM64_T8020 = -DARM64_BOARD_CONFIG_T8020 -mcpu=vortex
 MACHINE_FLAGS_ARM64_T8101 = -DARM64_BOARD_CONFIG_T8101 -D__ARM_ARCH_8_5__=1
 MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103 -D__ARM_ARCH_8_5__=1
@@ -311,7 +311,6 @@ CFLAGS_GEN = $(DEBUG_CFLAGS) -nostdinc \
 	-fno-builtin \
 	-fno-common \
 	-ftrivial-auto-var-init=zero \
-	-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang \
 	-fsigned-bitfields \
 	-fmerge-all-constants \
 	-fno-c++-static-destructors \
@@ -434,7 +433,16 @@ endif
 CFLAGS_GEN += -DUBSAN=1
 CFLAGS_GEN += $(foreach x,$(UBSAN_CHECKS) $(UBSAN_CHECKS_FATAL) $(UBSAN_CHECKS_TRAP),-fsanitize=$(x))
 CFLAGS_GEN += $(foreach x,$(UBSAN_CHECKS_FATAL),-fno-sanitize-recover=$(x))
-CFLAGS_GEN += $(foreach x,$(UBSAN_CHECKS_TRAP),-fsanitize-trap=$(x))
+# TEMP DIAGNOSTIC: trap-based instead of runtime-call-based for
+# UBSAN_CHECKS too (normally these call __ubsan_handle_* in san/ubsan.c,
+# which is only compiled in under the config_ubsan kernel-config profile,
+# itself only reachable via the much-heavier KASAN profile that needs its
+# own shadow-memory bring-up work this from-scratch boot isn't ready for).
+# -fsanitize-trap emits an inline udf/brk instead, needing no runtime
+# support at all - good enough to just prove/disprove a UB hypothesis
+# without pulling in all of KASAN. See project memory (bug #3 / build
+# toolchain investigation).
+CFLAGS_GEN += $(foreach x,$(UBSAN_CHECKS) $(UBSAN_CHECKS_TRAP),-fsanitize-trap=$(x))
 CFLAGS_GEN += $(foreach x,$(UBSAN_DISABLED),-fno-sanitize=$(x))
 endif
 

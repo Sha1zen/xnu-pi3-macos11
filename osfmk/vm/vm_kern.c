@@ -1425,6 +1425,13 @@ kmem_set_user_wire_limits(void)
 }
 
 
+/* TEMP DIAGNOSTIC: see project memory (Bug #5 continuation) */
+volatile unsigned int diag_kmem_init_region_select;
+volatile uint64_t diag_kmem_init_region_start;
+volatile uint64_t diag_kmem_init_region_size;
+volatile uint64_t diag_kmem_init_map_addr;
+volatile int diag_kmem_init_kr;
+
 /*
  *	kmem_init:
  *
@@ -1475,6 +1482,16 @@ kmem_init(
 			    VM_OBJECT_NULL,
 			    (vm_object_offset_t) 0, FALSE, VM_PROT_NONE, VM_PROT_NONE,
 			    VM_INHERIT_DEFAULT);
+
+			/* TEMP DIAGNOSTIC: latch full context of the pmap_virtual_region
+			 * loop right before a possible panic - see project memory
+			 * (Bug #5 continuation). volatile: LTO dead-strips non-volatile
+			 * globals nothing in the C program itself reads back. */
+			diag_kmem_init_region_select = region_select;
+			diag_kmem_init_region_start = region_start;
+			diag_kmem_init_region_size = region_size;
+			diag_kmem_init_map_addr = map_addr;
+			diag_kmem_init_kr = kr;
 
 			if (kr != KERN_SUCCESS) {
 				panic("kmem_init(0x%llx,0x%llx): vm_map_enter(0x%llx,0x%llx) error 0x%x\n",

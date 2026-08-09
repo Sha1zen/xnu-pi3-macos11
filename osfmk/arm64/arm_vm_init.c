@@ -125,6 +125,17 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) vm_kernelcache_top;
 /* Used by <mach/arm/vm_param.h> */
 SECURITY_READ_ONLY_LATE(unsigned long) gVirtBase;
 SECURITY_READ_ONLY_LATE(unsigned long) gPhysBase;
+
+/* TEMP DIAGNOSTIC: latch inputs/outputs of the PE_slide_devicetree() compat
+ * fix below, to empirically verify the slide arithmetic - see project
+ * memory (Bug #4 investigation). All volatile: LTO dead-strips non-volatile
+ * globals nothing in the C program itself reads back. */
+volatile unsigned long diag_gVirtBase_at_slide;
+volatile unsigned long diag_gPhysBase_at_slide;
+volatile unsigned long diag_slide_passed;
+volatile unsigned long diag_dtHead_before;
+volatile unsigned long diag_dtHead_after;
+volatile unsigned long diag_dtSize_before;
 SECURITY_READ_ONLY_LATE(unsigned long) gPhysSize;
 SECURITY_READ_ONLY_LATE(unsigned long) gT0Sz = T0SZ_BOOT;
 SECURITY_READ_ONLY_LATE(unsigned long) gT1Sz = T1SZ_BOOT;
@@ -1493,6 +1504,40 @@ arm_vm_physmap_init(boot_args *args)
 
 	arm_vm_page_granular_RWNX(end_kern, phystokv(args->topOfKernelData) - end_kern,
 	    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); /* Device Tree (if not locked down), RAM Disk (if present), bootArgs */
+
+	/* TEMP DIAGNOSTIC / COMPAT FIX: unlike the XNU_MONITOR branch above
+	 * (which calls PE_slide_devicetree() right after mapping the DT into
+	 * the physmap), this non-monitor branch never re-points DTRootNode
+	 * after this point. The DT/ramdisk/bootArgs region just mapped here
+	 * ends up reachable only via the ordinary phystokv() kernel slide
+	 * (gVirtBase - gPhysBase), not at its raw boot-time physical address -
+	 * but nothing tells device_tree.c's DTRootNode that. Every DT lookup
+	 * that happens before this point (PE_init_platform's early
+	 * !vm_initialized pass, still running under the V=P bootstrap
+	 * identity map) works fine; every lookup after this point - e.g.
+	 * pmap_bootstrap()'s pmap_compute_pv_targets(), which calls
+	 * SecureDTLookupEntry(NULL, "/defaults", ...) unconditionally and
+	 * asserts success - dereferences the stale raw-physical DTRootNode
+	 * against the new kernel-only page tables and takes a translation
+	 * fault (observed: fault VA matching the DTB's known physical
+	 * placement exactly, e.g. 0x8d10000-0x8d10920 matching DTEnd). Real
+	 * Apple monitor-enabled hardware never hits this because the monitor
+	 * branch always calls PE_slide_devicetree(); this board config
+	 * (NO_MONITOR=1) takes the other branch, which upstream apparently
+	 * never needed to (probably because real non-monitor Apple devices of
+	 * this vintage lock the DT down before this point via
+	 * SecureDTIsLockedDown(), a path this from-scratch bring-up doesn't
+	 * take). Fix: slide DTRootNode by the same standard kernel slide this
+	 * mapping actually used. See project memory. */
+	if (!SecureDTIsLockedDown()) {
+		diag_gVirtBase_at_slide = gVirtBase;
+		diag_gPhysBase_at_slide = gPhysBase;
+		diag_slide_passed = gVirtBase - gPhysBase;
+		diag_dtHead_before = (unsigned long)PE_state.deviceTreeHead;
+		diag_dtSize_before = (unsigned long)args->deviceTreeP;
+		PE_slide_devicetree(gVirtBase - gPhysBase);
+		diag_dtHead_after = (unsigned long)PE_state.deviceTreeHead;
+	}
 
 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
 	    real_avail_end - args->topOfKernelData, AP_RWNA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // rest of physmem

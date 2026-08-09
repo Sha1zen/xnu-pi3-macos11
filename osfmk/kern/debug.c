@@ -793,11 +793,44 @@ register_additional_panic_data_buffer(const char *producer_name, void *buf, int 
  * continue to debugger_collect_diagnostics() where we write the paniclog, corefile (if appropriate) and proceed
  * according to the device's boot-args.
  */
+
+/* TEMP DIAGNOSTIC / COMPAT FIX: explicit flag for "has this CPU's
+ * current_thread()/TPIDR_EL1 been programmed yet" - see the real check
+ * site in panic_trap_to_debugger() below for the full explanation. Set
+ * TRUE right after machine_set_current_thread() in arm_init() (osfmk/arm/
+ * arm_init.c). Deliberately NOT inferred from current_thread()==NULL:
+ * TPIDR_EL1 is genuine CPU-reset garbage before thread_bootstrap() runs
+ * on this port, not reliably zero, so current_thread() can return a
+ * non-NULL-but-still-invalid pointer this early. */
+boolean_t early_boot_thread_ready = FALSE;
+
+/* TEMP DIAGNOSTIC: latch the panic() format string pointer and caller
+ * return address so the QEMU-side abort hook can identify exactly which
+ * panic() call site fired, even though panic_trap_to_debugger's later
+ * machinery may itself crash before ever printing anything. volatile:
+ * LTO dead-strips non-volatile globals nothing in the C program itself
+ * reads back. See project memory (Bug #4/#5 investigation). */
+volatile const char *diag_last_panic_str;
+volatile unsigned long diag_last_panic_caller;
+volatile uint64_t diag_panic_entry_spsel;
+volatile uint64_t diag_panic_entry_daif;
+
 #undef panic
 void
 panic(const char *str, ...)
 {
 	va_list panic_str_args;
+
+	{
+		uint64_t spsel_val, daif_val;
+		__asm__ volatile ("mrs %0, SPSel" : "=r"(spsel_val));
+		__asm__ volatile ("mrs %0, DAIF" : "=r"(daif_val));
+		diag_panic_entry_spsel = spsel_val;
+		diag_panic_entry_daif = daif_val;
+	}
+
+	diag_last_panic_str = str;
+	diag_last_panic_caller = (unsigned long)(char *)__builtin_return_address(0);
 
 	va_start(panic_str_args, str);
 	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0));
@@ -852,6 +885,53 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
 {
 #pragma clang diagnostic pop
+
+	/* TEMP DIAGNOSTIC / COMPAT FIX: this port can call panic() very
+	 * early in arm_init() - PE_init_platform()'s device-tree lookups
+	 * run before any real thread exists (thread_bootstrap() +
+	 * machine_set_current_thread(), which programs TPIDR_EL1, don't run
+	 * until later in arm_init() - see osfmk/arm/arm_init.c). Everything
+	 * below this point (CPUDEBUGGERCOUNT++ and friends) goes through
+	 * current_percpu_base() -> current_thread() -> TPIDR_EL1. On real
+	 * Apple hardware TPIDR_EL1 gets populated even earlier than that,
+	 * specifically to survive exactly this scenario, but it's gated
+	 * behind __ARM_KERNEL_PROTECT__ + KERNEL_INTEGRITY_KTRR (osfmk/
+	 * arm64/start.s) - flags this bring-up board doesn't set. TPIDR_EL1
+	 * is left at whatever garbage it had at CPU reset (confirmed NOT
+	 * reliably zero - current_thread()==NULL doesn't reliably catch
+	 * this), so the very next per-CPU-state access below
+	 * (CPUDEBUGGERCOUNT, i.e. current_debugger_state()->db_entry_count)
+	 * dereferences garbage and takes a *second*, unrelated data abort -
+	 * which this port's exception handling doesn't escalate into a real
+	 * halt, so execution silently resumes wherever it can, well past
+	 * the original panic. That masked the real bug this panic was
+	 * trying to report (a device-tree pointer computation going wrong)
+	 * behind an unpredictable secondary crash for an entire debugging
+	 * session. Root-caused via QEMU-side instrumentation - see project
+	 * memory. Fix: skip all per-CPU-state-dependent machinery and go
+	 * straight to printing the message + halting when no thread exists
+	 * yet, using the explicit early_boot_thread_ready flag rather than
+	 * inferring it from current_thread()'s unreliable return value. */
+	if (!early_boot_thread_ready) {
+		/* Deliberately not calling kprintf()/_doprnt()/halt_all_cpus()
+		 * here - an earlier version of this fix did, and caused an
+		 * infinite recursive panic loop (confirmed via QEMU-side
+		 * backtrace showing a tight repeating call cycle with an
+		 * ever-growing stack): kprintf() itself calls cpu_number()
+		 * (-> getCpuDatap(), another per-CPU-state access) and
+		 * os_log_with_args(), either of which can fault the exact same
+		 * way CPUDEBUGGERCOUNT did, re-entering this same panic path.
+		 * halt_all_cpus() also goes through printf()/PEHaltRestart()
+		 * before its final while(1), same risk. This early, the
+		 * QEMU-side first_panic_x / last_prop_x / last_lookup_x globals in
+		 * device_tree.c (written before panic() is ever called) are
+		 * already sufficient to diagnose from outside the guest - just
+		 * spin forever with no further calls. See project memory. */
+		for (;;) {
+			;
+		}
+		/* NOTREACHED */
+	}
 
 #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
 	/* Turn off I/O tracing once we've panicked */

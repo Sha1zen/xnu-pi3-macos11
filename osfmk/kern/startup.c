@@ -340,6 +340,17 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 	logged = subsystem;
 }
 
+/* TEMP DIAGNOSTIC: bisect where SPSel gets stuck at 1 - see project memory
+ * (Bug #5 investigation). Latches the subsystem/func of the first startup
+ * entry observed to leave SPSel==1 after cur->func() returns. volatile:
+ * LTO dead-strips non-volatile globals nothing in the C program itself
+ * reads back. */
+volatile uint32_t diag_spsel_bad_subsystem;
+volatile void *diag_spsel_bad_func;
+volatile uint8_t diag_spsel_bad_latched;
+volatile uint64_t diag_spsel_last_subsystem;
+volatile void *diag_spsel_last_func;
+
 __startup_func
 void
 kernel_startup_initialize_upto(startup_subsystem_id_t upto)
@@ -356,7 +367,18 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
 		}
 		startup_phase = cur->subsystem - 1;
 		kernel_startup_log(cur->subsystem);
+		diag_spsel_last_subsystem = cur->subsystem;
+		diag_spsel_last_func = (void *)cur->func;
 		cur->func(cur->arg);
+		{
+			uint64_t spsel_val;
+			__asm__ volatile ("mrs %0, SPSel" : "=r"(spsel_val));
+			if (spsel_val != 0 && !diag_spsel_bad_latched) {
+				diag_spsel_bad_subsystem = cur->subsystem;
+				diag_spsel_bad_func = (void *)cur->func;
+				diag_spsel_bad_latched = 1;
+			}
+		}
 		startup_entry_cur = ++cur;
 	}
 	kernel_startup_log(upto);
@@ -368,12 +390,23 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
 	startup_phase = upto;
 }
 
+/* TEMP DIAGNOSTIC: bisect where SPSel gets stuck at 1 - see project memory
+ * (Bug #5 investigation). volatile: LTO dead-strips non-volatile globals
+ * nothing in the C program itself reads back. */
+volatile uint64_t diag_kernel_bootstrap_entry_spsel;
+
 void
 kernel_bootstrap(void)
 {
 	kern_return_t   result;
 	thread_t        thread;
 	char            namep[16];
+
+	{
+		uint64_t spsel_val;
+		__asm__ volatile ("mrs %0, SPSel" : "=r"(spsel_val));
+		diag_kernel_bootstrap_entry_spsel = spsel_val;
+	}
 
 	printf("%s\n", version); /* log kernel version */
 

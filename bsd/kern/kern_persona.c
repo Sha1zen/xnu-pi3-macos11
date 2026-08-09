@@ -29,6 +29,7 @@
 #include <sys/kernel_types.h>
 #include <sys/persona.h>
 #include <pexpert/pexpert.h>
+#include <machine/cpu_capabilities.h>
 
 #if CONFIG_PERSONAS
 #include <machine/atomic.h>

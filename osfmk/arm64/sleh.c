@@ -494,11 +494,25 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 	    state->pc, state->cpsr, state->esr, state->far);
 }
 
+/* TEMP DIAGNOSTIC: latch the ORIGINAL exception's esr/far/pc before this
+ * handler's unconditional panic - the QEMU abort hook can only see the
+ * SECOND, nested fault that happens inside panic_trap_to_debugger while
+ * trying to report this one. volatile: LTO dead-strips non-volatile
+ * globals nothing in the C program itself reads back. See project memory
+ * (Bug #5 investigation). */
+volatile uint32_t diag_sp1_esr;
+volatile vm_offset_t diag_sp1_far;
+volatile uint64_t diag_sp1_pc;
+
 void
 sleh_synchronous_sp1(arm_context_t *context, uint32_t esr, vm_offset_t far __unused)
 {
 	esr_exception_class_t  class = ESR_EC(esr);
 	arm_saved_state_t    * state = &context->ss;
+
+	diag_sp1_esr = esr;
+	diag_sp1_far = far;
+	diag_sp1_pc = get_saved_state_pc(state);
 
 	switch (class) {
 	case ESR_EC_UNCATEGORIZED:
@@ -555,7 +569,20 @@ __attribute__((__always_inline__))
 static inline void
 task_vtimer_check(thread_t thread)
 {
-	if (__improbable(thread->task->vtimers)) {
+	/* TEMP DIAGNOSTIC / COMPAT FIX: thread->task is legitimately NULL here
+	 * when this fires via the deliberate self-inflicted TRAP_DEBUGGER
+	 * exception that panic_trap_to_debugger()/DebuggerTrapWithState() use
+	 * to unify C-level and trap-based panics (see debug.c) - if that
+	 * panic happens during kernel_bootstrap() before the bootstrap
+	 * context has been assigned a real task (e.g. a real, legitimate
+	 * vm_packing_verify_range() assertion firing this early), the
+	 * resulting exception reaches here with a valid thread but no task
+	 * yet, and this NULL-task dereference (thread->task->vtimers, FAR
+	 * lands at task+0x2c) masks the real panic behind a second fault
+	 * before its message is ever seen. On a fully-booted system
+	 * thread->task is never NULL when an exception is taken, so this
+	 * check is a no-op there. See project memory (Bug #5). */
+	if (__improbable(thread->task != NULL && thread->task->vtimers)) {
 		thread->ast |= AST_BSD;
 		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
 	}

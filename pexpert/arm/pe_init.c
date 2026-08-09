@@ -372,7 +372,22 @@ void
 PE_slide_devicetree(vm_offset_t slide)
 {
 	assert(PE_state.initialized);
-	PE_state.deviceTreeHead += slide;
+	/* TEMP DIAGNOSTIC / COMPAT FIX: this used to be plain pointer
+	 * arithmetic (`PE_state.deviceTreeHead += slide;`). Our modern
+	 * Xcode 26.6 clang - much newer than whatever built this xnu-7195
+	 * vintage originally - instruments `void* + integer` with a
+	 * pointer-arithmetic-overflow hardening check that doesn't
+	 * understand phystokv()-style "physical address plus a huge kernel
+	 * slide, deliberately flipping the top bits into canonical kernel
+	 * space" as legitimate: it detects the top-bit change and POISONS
+	 * the result with a fixed movk #0xc8a2 marker instead of trapping
+	 * (confirmed via lldb disassembly of the compiled function).
+	 * phystokv() elsewhere in the tree never hits this because it does
+	 * the identical slide as plain vm_offset_t integer arithmetic, only
+	 * casting to a pointer at the point of use - do the same here to
+	 * sidestep the check entirely, since the actual math is correct.
+	 * See project memory (Bug #4 investigation). */
+	PE_state.deviceTreeHead = (void *)((vm_offset_t)PE_state.deviceTreeHead + slide);
 	SecureDTInit(PE_state.deviceTreeHead, PE_state.deviceTreeSize);
 }
 

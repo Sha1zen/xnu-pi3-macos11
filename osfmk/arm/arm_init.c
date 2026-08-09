@@ -289,6 +289,10 @@ arm_auxkc_init(void *mh, void *base)
  *		Function:		Runs on the boot CPU, once, on entry from iBoot.
  */
 
+/* TEMP DIAGNOSTIC / COMPAT FIX: see osfmk/kern/debug.c for the full
+ * explanation - set TRUE below once current_thread()/TPIDR_EL1 is valid. */
+extern boolean_t early_boot_thread_ready;
+
 __startup_func
 void
 arm_init(
@@ -380,6 +384,11 @@ arm_init(
 	thread->machine.CpuDatap = &BootCpuData;
 	thread->machine.pcpu_data_base = (vm_offset_t)0;
 	machine_set_current_thread(thread);
+	/* TEMP DIAGNOSTIC / COMPAT FIX: see the matching check in
+	 * panic_trap_to_debugger() (osfmk/kern/debug.c) - current_thread()/
+	 * TPIDR_EL1 only becomes valid as of the line above; tell panic()
+	 * it's now safe to touch per-CPU state. See project memory. */
+	early_boot_thread_ready = TRUE;
 
 	/*
 	 * Preemption is enabled for this thread so that it can lock mutexes without

@@ -5032,7 +5032,45 @@ pmap_virtual_region(
 		ret = TRUE;
 	}
 
-	if (region_select == 3) {
+	/* TEMP DIAGNOSTIC / COMPAT FIX: this board's loader gives phys_base ==
+	 * mem_base (see project memory), which makes this kernel's fixed
+	 * __TEXT link address collide exactly with LOW_GLOBAL_BASE_ADDRESS -
+	 * i.e. (gVirtBase & low_global_vr_mask) == LOW_GLOBAL_BASE_ADDRESS
+	 * always on this board, so the low-global block above never fires
+	 * for any region_select (its own guard condition is permanently
+	 * false here) - which is correct, since attempting that fixed 8MB
+	 * reservation for real actually fails downstream with KERN_NO_SPACE
+	 * (confirmed via a live diag latch in kmem_init: region_select=2,
+	 * kr=3), because that VA range genuinely overlaps the kernel's own
+	 * already-mapped image on this collided layout. But the *original*
+	 * upstream code only ever reserves the heap range
+	 * [VM_MIN_KERNEL_ADDRESS, LOW_GLOBAL_BASE_ADDRESS) under
+	 * region_select==3, one iteration *after* the (here, permanently
+	 * skipped) low-global block - so kmem_init()'s region-probing loop,
+	 * which stops at the first pmap_virtual_region() call that returns
+	 * FALSE, terminates at region_select==2 without ever reaching this
+	 * block, silently dropping the heap-range reservation. That missing
+	 * reservation is what shifts the zone restricted-VA submap onto/
+	 * below KERNEL_PMAP_HEAP_RANGE_START, tripping
+	 * vm_packing_verify_range()'s "min <= base" panic downstream in
+	 * zone_submap_init(). Fix: relabel this block from region_select==3
+	 * to region_select==2, so the loop's very next (and, on this board,
+	 * last-successful) iteration does the heap-range reservation instead
+	 * of the doomed low-global one. Real region_select==3 then correctly
+	 * finds nothing left to reserve and the loop terminates cleanly. The
+	 * known-good precompiled reference kernel for this exact xnu-7195
+	 * vintage needed the functionally-identical fix as a raw binary
+	 * patch (a single `cmp w0,#3`->`cmp w0,#2` instruction edit in this
+	 * exact function) - this is that same fix as a real source change.
+	 * Wrong on real hardware/genuine KASLR (where gVirtBase can't
+	 * collide with LOW_GLOBAL_BASE_ADDRESS this way and the low-global
+	 * block above does fire normally), safe only because this loader+
+	 * board combo deterministically produces the collision. See project
+	 * memory (Bug #5 / pmap_virtual_region fix history). Uses else-if so the
+ * two region_select==2 checks stay mutually exclusive - on real hardware
+ * (gate above true) region_select==2 still does only the low-global
+ * reservation, unchanged from upstream. */
+	else if (region_select == 2) {
 		/* In this config, we allow the bootstrap mappings to occupy the same
 		 * page table pages as the heap.
 		 */
@@ -15233,3 +15271,17 @@ pmap_test(void)
 	return KERN_SUCCESS;
 }
 #endif /* CONFIG_XNUPOST */
+
+/* TEMP DIAGNOSTIC / COMPAT: this xnu-7195.81.3-vintage arm/pmap.c never
+ * implemented pmap_cs_allow_invalid() at all (only osfmk/x86_64/pmap.c
+ * does), but osfmk/vm/vm_map.c's vm_map_cs_wx_enable() calls it
+ * unconditionally regardless of architecture. Stubbed identically to the
+ * real x86_64 implementation (a real, intentional no-op there too - see
+ * that file's own "Unsupported on this architecture" comment), not a
+ * guess. See project memory for the full porting rationale. */
+kern_return_t
+pmap_cs_allow_invalid(__unused pmap_t pmap)
+{
+	// Unsupported on this architecture.
+	return KERN_SUCCESS;
+}

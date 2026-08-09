@@ -2489,3 +2489,16 @@ ml_cluster_wfe_timeout(uint32_t wfe_cluster_id)
 	uint64_t wfet = os_atomic_load(&arm64_cluster_wfe_recs[wfe_cluster_id], relaxed);
 	return wfet;
 }
+
+/* TEMP DIAGNOSTIC / COMPAT: declared in osfmk/arm/machine_routines.h and
+ * called unconditionally from arm_vm_init() regardless of NO_MONITOR, but
+ * never actually defined anywhere in this xnu-7195.81.3 opensource tree
+ * (same class of gap as pmap_cs_allow_invalid - a real implementation
+ * presumably exists only for machine configs with an EL3 monitor/PPL,
+ * which isn't publicly included). BCM2837.h sets NO_MONITOR=1 (no EL3
+ * monitor on this CPU at all), so "enabling" it is correctly a no-op.
+ * See project memory for the full porting rationale. */
+void
+ml_enable_monitor(void)
+{
+}

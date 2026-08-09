@@ -76,6 +76,11 @@ OS_ENUM(firehose_stream, uint8_t,
     firehose_stream_signpost                    = 4,
     firehose_stream_memory_wifi                 = 5,
     firehose_stream_memory_baseband             = 6,
+    /* TEMP DIAGNOSTIC / COMPAT: added for the much newer libdispatch
+     * (libdispatch-1542.100.32) firehose_buffer_internal.h being built
+     * against this xnu-7195.81.3-vintage header - additive, doesn't
+     * renumber any existing value. See project memory. */
+    firehose_stream_metric                      = 7,
 
     _firehose_stream_max,
     );

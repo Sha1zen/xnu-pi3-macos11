@@ -214,6 +214,14 @@ struct IORPC {
 	IORPCMessageMach * reply;
 	uint32_t           sendSize;
 	uint32_t           replySize;
+#ifdef KERNEL
+	/* TEMP DIAGNOSTIC / COMPAT: added to match the ABI our real, much newer
+	 * `iig` (Xcode 26.6) generates code against - this xnu-7195 vintage's
+	 * IORPC predates this field. See project memory for the full iig
+	 * version-skew rationale (same class of fix as OSAction::CreateWithTypeName
+	 * on the older xnu-6153 tree earlier this session). */
+	IORPCMessage     * kernelContent;
+#endif /* KERNEL */
 };
 typedef struct IORPC IORPC;
 

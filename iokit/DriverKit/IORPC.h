@@ -214,6 +214,11 @@ struct IORPC {
 	IORPCMessageMach * reply;
 	uint32_t           sendSize;
 	uint32_t           replySize;
+#ifdef KERNEL
+	/* TEMP DIAGNOSTIC / COMPAT: see iokit/IOKit/IORPC.h - same fix, kept
+	 * in sync since this is a duplicate copy of the same struct. */
+	IORPCMessage     * kernelContent;
+#endif /* KERNEL */
 };
 typedef struct IORPC IORPC;
 

@@ -224,6 +224,25 @@ void
 StartIOKitMatching(void)
 {
 	assert(gRootNub != NULL);
+
+	/*
+	 * Real macOS calls IOService::cpusRunning() from IOCPU-driven CPU
+	 * bring-up once all cores are running, which sets gCPUsRunning=true.
+	 * This bare boot has no IOCPU driver (cores are parked at the osfmk
+	 * level instead), so that call site never exists and gCPUsRunning
+	 * stays permanently false. _IOServiceJob::pingConfig()'s config-
+	 * thread-count throttle (gNumConfigThreads < gMaxConfigThreads) is
+	 * unconditionally bypassed by an `|| !gCPUsRunning` clause meant for
+	 * early boot before CPUs are up - since that's permanently true here,
+	 * EVERY queued async matching job (e.g. IOMedia's
+	 * registerService(kIOServiceAsynchronous)) spawns a brand new
+	 * _IOConfigThread instead of reusing the pool, causing unbounded
+	 * kernel_thread_start() churn. Call it once here, before matching
+	 * (and therefore before any async job can be queued), so the normal
+	 * throttle applies.
+	 */
+	IOService::getServiceRoot()->cpusRunning();
+
 	bool ok = gRootNub->startIOServiceMatching();
 	if (__improbable(!ok)) {
 		panic("Failed to start IOService matching");

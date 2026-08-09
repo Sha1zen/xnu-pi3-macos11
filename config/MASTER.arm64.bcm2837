@@ -27,17 +27,17 @@
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs]
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
-#  FILESYS_DEV =    [ FILESYS_BASE fdesc mockfs msdosfs ]
-#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc mockfs msdosfs ]
-#  TEMP DIAGNOSTIC: "hfs" deliberately left out for now - all 37 bsd/hfs/*
-#  files + their bsd/conf/files "optional hfs" entries are fully vendored
-#  and ready, but SETUP/config's ancient doconf/mkmakefile tool silently
-#  drops ~10 of the 37 files from the generated Makefile's OBJS link
-#  variable (files exist, .o's compile fine, just never make it into the
-#  final link - confirmed via a from-scratch Makefile regeneration, not a
-#  cache issue) - real bug in 1980s-vintage tooling, not yet root-caused.
-#  Re-add "hfs" here once that's fixed. See project memory / this session's
-#  history for the investigation so far.
+#  FILESYS_DEV =    [ FILESYS_BASE fdesc mockfs msdosfs hfs ]
+#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc mockfs msdosfs hfs ]
+#  "hfs" re-enabled 2026-08-09: the previously-suspected SETUP/config
+#  OBJS-dropping bug did not reproduce under a from-scratch doconf/config
+#  dry run (all 38 bsd/hfs/*.o showed up correctly) or under a real full
+#  build (all 38 linked in, confirmed via nm) - last session's diagnosis
+#  was very likely a stale-cache artifact, not a real tooling bug. The
+#  only real gap was one missing symbol, `panic_on_assert`, which
+#  bsd/hfs/hfs_dbg.h declares `extern` on non-DEBUG builds and real
+#  Apple's OSS drop never defines - fixed with a real definition in our
+#  own bsd/hfs/hfs_vfsinit.c shim.
 #  NFS_DEV =        [ nfsclient nfsserver config_nfs_gss ]
 #  NFS_RELEASE =    [ nfsclient ]
 #  NFS_DEBUG =      [ nfsclient config_nfs_gss ]

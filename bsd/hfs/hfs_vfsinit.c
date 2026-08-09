@@ -45,6 +45,16 @@
 #include "hfs.h"
 #include "hfs_iokit.h"
 
+/*
+ * hfs_dbg.h declares `extern bool panic_on_assert;` on non-DEBUG builds
+ * (our DEVELOPMENT config doesn't define DEBUG), expecting a real global
+ * definition from elsewhere in hfs.kext - stripped from this OSS drop
+ * (same class of gap as other symbols missing from this vintage's public
+ * source). false matches production semantics: hfs_assert()/hfs_warn()
+ * become no-ops/printf instead of panicking.
+ */
+bool panic_on_assert = false;
+
 extern struct vnodeopv_desc hfs_vnodeop_opv_desc;
 #if CONFIG_HFS_STD
 extern struct vnodeopv_desc hfs_std_vnodeop_opv_desc;

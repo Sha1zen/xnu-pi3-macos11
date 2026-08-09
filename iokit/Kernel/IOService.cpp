@@ -4714,7 +4714,9 @@ _IOConfigThread::configThread( const char * name )
 			continue;
 		}
 		thread_t thread;
-		if (KERN_SUCCESS != kernel_thread_start(&_IOConfigThread::main, inst, &thread)) {
+		kern_return_t kts_kr = kernel_thread_start(&_IOConfigThread::main, inst, &thread);
+		IOLog("TEMP DIAGNOSTIC: _IOConfigThread::configThread kernel_thread_start kr=%d\n", kts_kr);
+		if (KERN_SUCCESS != kts_kr) {
 			continue;
 		}
 
@@ -5181,6 +5183,7 @@ _IOConfigThread::main(void * arg, wait_result_t result)
 	kern_return_t   kr;
 	thread_precedence_policy_data_t precedence = { -1 };
 
+	IOLog("TEMP DIAGNOSTIC: _IOConfigThread::main entered\n");
 	kr = thread_policy_set(current_thread(),
 	    THREAD_PRECEDENCE_POLICY,
 	    (thread_policy_t) &precedence,

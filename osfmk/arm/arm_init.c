@@ -459,6 +459,19 @@ arm_init(
 
 	arm_vm_init(xmaxmem, args);
 
+	/* COMPAT FIX (ported from the old xnu-6153 tree, ml_io_map() call
+	 * site relocated here - see pexpert/arm/pe_init.c's
+	 * bcm2837_video_init() comment for why): boot_args->Video is always
+	 * zero (neither loader this project boots through populates it), so
+	 * PE_state.video is zero too. Try to get a real HDMI framebuffer
+	 * from the GPU firmware before PE_create_console() below reads
+	 * PE_state.video.v_display to pick kPEGraphicsMode vs. kPETextMode.
+	 * Must run after arm_vm_init() (ml_io_map() needs VM/pmap
+	 * bootstrapped) and before PE_create_console(). On any failure this
+	 * just leaves PE_state.video zeroed, identical to not calling it. */
+	extern boolean_t bcm2837_video_init(PE_Video *video);
+	bcm2837_video_init(&PE_state.video);
+
 	if (debug_boot_arg) {
 		patch_low_glo();
 	}

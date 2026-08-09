@@ -391,6 +391,275 @@ PE_slide_devicetree(vm_offset_t slide)
 	SecureDTInit(PE_state.deviceTreeHead, PE_state.deviceTreeSize);
 }
 
+/*
+ * BCM2837 VideoCore mailbox property-tag protocol - requests an HDMI
+ * framebuffer from the GPU firmware so PE_state.video can be populated
+ * before PE_create_console() runs (see its call site in PE_init_platform
+ * below), giving video_console.c a real scrollback console on HDMI instead
+ * of nothing.
+ *
+ * Ported from the project's old xnu-6153 tree (third_party/xnu,
+ * pexpert/arm/pe_init.c), where it was originally written and validated
+ * against project memory's register/tag-ID cross-checks (Linux's
+ * drivers/mailbox/bcm2835-mailbox.c and drivers/firmware/raspberrypi.c;
+ * tag IDs also cross-checked against third_party/qemu-zhuowei's own
+ * hw/misc/bcm2835_property.c). Adapted for this tree's vintage: uses
+ * SecureDTFindEntry/SecureDTGetProperty (this tree has no plain
+ * DTFindEntry/DTGetProperty), and ml_vtophys instead of kvtophys (the
+ * choice the old tree's own follow-up fix settled on as the actually
+ * working API for that vintage - kept here for consistency, and it's
+ * already reachable via this file's existing <machine/machine_routines.h>
+ * include, so no new #include is needed).
+ *
+ * Neither loader this project boots through populates boot_args->Video at
+ * all (confirmed: neither third_party/qemu-zhuowei's arm_load_macho() nor
+ * FlorentRevest/u-boot's cmd/bootxnu.c touch it, both leave it zeroed), so
+ * this always runs. On any failure it just returns FALSE and leaves
+ * PE_state.video zeroed exactly as before - falls back to the existing
+ * kPETextMode path, no regression versus not having this at all.
+ */
+enum {
+	kBcm2837MboxRegRead        = 0x00 / sizeof(uint32_t), // MAIL0_RD  (VC -> ARM)
+	kBcm2837MboxRegStatus      = 0x18 / sizeof(uint32_t), // MAIL0_STA
+	kBcm2837MboxRegWrite       = 0x20 / sizeof(uint32_t), // MAIL1_WRT (ARM -> VC)
+	kBcm2837MboxRegWriteStatus = 0x38 / sizeof(uint32_t), // MAIL1_STA (ARM_0_MAIL1 + 0x18)
+
+	kBcm2837MboxFull  = 1U << 31,
+	kBcm2837MboxEmpty = 1U << 30,
+
+	kBcm2837MboxChannelProperty = 8,
+};
+
+enum {
+	kBcm2837TagSetPhysicalWH  = 0x00048003,
+	kBcm2837TagSetVirtualWH   = 0x00048004,
+	kBcm2837TagSetDepth       = 0x00048005,
+	kBcm2837TagSetPixelOrder  = 0x00048006,
+	kBcm2837TagAllocateBuffer = 0x00040001,
+	kBcm2837TagGetPitch       = 0x00040008,
+	kBcm2837TagEnd            = 0,
+
+	/*
+	 * osfmk/console/video_console.c's 32bpp renderer hardcodes
+	 * little-endian 0x00RRGGBB words regardless of v_pixelFormat
+	 * (confirmed on the old tree: that field is written here and in the
+	 * i386 pe_init.c, but never read anywhere in that source tree -
+	 * purely decorative; this tree's PE_init_platform similarly just
+	 * strlcpy()s a fixed "BBBBBBBBGGGGGGGGRRRRRRRR" string into it from
+	 * boot_args, never derived from real pixel order). 0x00RRGGBB stored
+	 * little-endian is BB,GG,RR,00 in memory - i.e. the framebuffer needs
+	 * BGR byte order, not RGB, to render real colors instead of
+	 * red/blue swapped.
+	 */
+	kBcm2837PixelOrderBGR = 0,
+};
+
+/*
+ * Fixed layout for exactly the 5 tags bcm2837_video_init() sends, laid out
+ * as a flat uint32_t array (not a C struct) so the on-the-wire word offsets
+ * are unambiguous and match the real property-list framing byte-for-byte:
+ * buf[0]=total size, buf[1]=request/response code, then each tag is
+ * {tag_id, value_buf_size, req_resp_size, ...value words...}, terminated
+ * by a lone 0 end tag.
+ */
+enum {
+	kMsgIdxSize = 0,
+	kMsgIdxCode = 1,
+
+	kMsgIdxPhysWHTag = 2, kMsgIdxPhysWHBufSize = 3, kMsgIdxPhysWHReqSize = 4,
+	kMsgIdxPhysW = 5, kMsgIdxPhysH = 6,
+
+	kMsgIdxVirtWHTag = 7, kMsgIdxVirtWHBufSize = 8, kMsgIdxVirtWHReqSize = 9,
+	kMsgIdxVirtW = 10, kMsgIdxVirtH = 11,
+
+	kMsgIdxDepthTag = 12, kMsgIdxDepthBufSize = 13, kMsgIdxDepthReqSize = 14,
+	kMsgIdxDepthVal = 15,
+
+	kMsgIdxOrderTag = 16, kMsgIdxOrderBufSize = 17, kMsgIdxOrderReqSize = 18,
+	kMsgIdxOrderVal = 19,
+
+	kMsgIdxAllocTag = 20, kMsgIdxAllocBufSize = 21, kMsgIdxAllocReqSize = 22,
+	kMsgIdxAllocBase = 23, kMsgIdxAllocRespSize = 24,
+
+	kMsgIdxPitchTag = 25, kMsgIdxPitchBufSize = 26, kMsgIdxPitchReqSize = 27,
+	kMsgIdxPitchVal = 28,
+
+	kMsgIdxEnd = 29,
+
+	kBcm2837MsgWords = 30,
+};
+
+#define BCM2837_FB_WIDTH  640
+#define BCM2837_FB_HEIGHT 480
+#define BCM2837_FB_DEPTH  32
+
+/*
+ * Submits msg (msg[kMsgIdxSize] must already be set to the total buffer
+ * size in bytes) over the property-tag channel and blocks until the GPU
+ * replies into the same buffer. msg must be 16-byte aligned - the low 4
+ * bits of the physical address double as the mailbox channel number in the
+ * wire protocol.
+ *
+ * The explicit cache maintenance here isn't optional: msg lives in normal
+ * cached kernel memory, but the GPU firmware reads/writes it over the bus
+ * with no CPU cache involved at all, so a write the CPU thinks already
+ * happened may still only be sitting in a cache line until CleanPoC_
+ * DcacheRegion() pushes it out, and a read after the GPU's reply may
+ * return a stale cached copy until FlushPoC_DcacheRegion() invalidates it.
+ */
+static boolean_t
+bcm2837_mbox_call(volatile uint32_t *mbox, uint32_t *msg)
+{
+	addr64_t msgPhys = ml_vtophys((vm_offset_t) msg);
+	if ((msgPhys & 0xF) != 0) {
+		return FALSE;
+	}
+
+	CleanPoC_DcacheRegion((vm_offset_t) msg, msg[kMsgIdxSize]);
+
+	unsigned waited = 0;
+	while (mbox[kBcm2837MboxRegWriteStatus] & kBcm2837MboxFull) {
+		if (waited++ > 100000) {
+			return FALSE;
+		}
+	}
+	mbox[kBcm2837MboxRegWrite] = (uint32_t)(msgPhys & ~0xFULL) | kBcm2837MboxChannelProperty;
+
+	waited = 0;
+	for (;;) {
+		while (mbox[kBcm2837MboxRegStatus] & kBcm2837MboxEmpty) {
+			if (waited++ > 1000000) {
+				return FALSE;
+			}
+		}
+		uint32_t reply = mbox[kBcm2837MboxRegRead];
+		if ((reply & 0xF) == kBcm2837MboxChannelProperty) {
+			break;
+		}
+		/* Not our channel (shouldn't happen - we never registered any
+		 * other channel's IRQ/consumer) - keep draining. */
+	}
+
+	FlushPoC_DcacheRegion((vm_offset_t) msg, msg[kMsgIdxSize]);
+	return msg[kMsgIdxCode] == 0x80000000; /* RPI_FIRMWARE_STATUS_SUCCESS */
+}
+
+/*
+ * Looks up the "mbox" DT node (devicetrees/rpi3.dts / rpi3-realhw.dts),
+ * requests a BCM2837_FB_WIDTH x BCM2837_FB_HEIGHT x BCM2837_FB_DEPTH HDMI
+ * framebuffer from the GPU firmware, and fills in *video on success.
+ * Returns FALSE (leaving *video untouched) on any failure - missing DT
+ * node, mailbox timeout, or a GPU-reported error.
+ *
+ * NOT static, NOT called from PE_init_platform above (unlike the old
+ * xnu-6153 tree this was ported from) - confirmed via a live QEMU crash
+ * (fault in io_map_with_prot, called from ml_io_map below, called from
+ * PE_init_platform's first (!vm_initialized) pass) that ml_io_map() isn't
+ * safe that early on this tree: VM/pmap isn't bootstrapped until
+ * arm_vm_init() (osfmk/arm/arm_init.c), which runs strictly after
+ * PE_init_platform(FALSE, ...). Called instead directly from arm_init()
+ * between arm_vm_init() and PE_create_console() - see the extern
+ * declaration and call site there for why that's the correct window.
+ */
+boolean_t
+bcm2837_video_init(PE_Video *video)
+{
+	DTEntry entry;
+	uintptr_t const *reg_prop;
+	unsigned int prop_size;
+	vm_offset_t soc_base = pe_arm_get_soc_base_phys();
+
+	if (soc_base == 0) {
+		return FALSE;
+	}
+	if (SecureDTFindEntry("name", "mbox", &entry) != kSuccess) {
+		return FALSE;
+	}
+	if (SecureDTGetProperty(entry, "reg", (void const **)&reg_prop, &prop_size) != kSuccess) {
+		return FALSE;
+	}
+
+	volatile uint32_t *mboxBase = (volatile uint32_t *) ml_io_map(soc_base + reg_prop[0], (vm_size_t)reg_prop[1]);
+	if (mboxBase == NULL) {
+		return FALSE;
+	}
+
+	static uint32_t sMboxMsg[kBcm2837MsgWords] __attribute__((aligned(16)));
+	uint32_t *b = sMboxMsg;
+
+	b[kMsgIdxCode] = 0; /* RPI_FIRMWARE_STATUS_REQUEST */
+
+	b[kMsgIdxPhysWHTag] = kBcm2837TagSetPhysicalWH;
+	b[kMsgIdxPhysWHBufSize] = 8;
+	b[kMsgIdxPhysWHReqSize] = 0;
+	b[kMsgIdxPhysW] = BCM2837_FB_WIDTH;
+	b[kMsgIdxPhysH] = BCM2837_FB_HEIGHT;
+
+	b[kMsgIdxVirtWHTag] = kBcm2837TagSetVirtualWH;
+	b[kMsgIdxVirtWHBufSize] = 8;
+	b[kMsgIdxVirtWHReqSize] = 0;
+	b[kMsgIdxVirtW] = BCM2837_FB_WIDTH;
+	b[kMsgIdxVirtH] = BCM2837_FB_HEIGHT;
+
+	b[kMsgIdxDepthTag] = kBcm2837TagSetDepth;
+	b[kMsgIdxDepthBufSize] = 4;
+	b[kMsgIdxDepthReqSize] = 0;
+	b[kMsgIdxDepthVal] = BCM2837_FB_DEPTH;
+
+	b[kMsgIdxOrderTag] = kBcm2837TagSetPixelOrder;
+	b[kMsgIdxOrderBufSize] = 4;
+	b[kMsgIdxOrderReqSize] = 0;
+	b[kMsgIdxOrderVal] = kBcm2837PixelOrderBGR;
+
+	b[kMsgIdxAllocTag] = kBcm2837TagAllocateBuffer;
+	b[kMsgIdxAllocBufSize] = 8;
+	b[kMsgIdxAllocReqSize] = 0;
+	b[kMsgIdxAllocBase] = 16; /* requested alignment, in bytes */
+	b[kMsgIdxAllocRespSize] = 0;
+
+	b[kMsgIdxPitchTag] = kBcm2837TagGetPitch;
+	b[kMsgIdxPitchBufSize] = 4;
+	b[kMsgIdxPitchReqSize] = 0;
+	b[kMsgIdxPitchVal] = 0;
+
+	b[kMsgIdxEnd] = kBcm2837TagEnd;
+	b[kMsgIdxSize] = kBcm2837MsgWords * sizeof(uint32_t);
+
+	if (!bcm2837_mbox_call(mboxBase, b)) {
+		return FALSE;
+	}
+
+	/* The returned bus address has one of the VC alias bits (0x40000000/
+	 * 0x80000000/0xC0000000, selecting cache behavior on the VC's own
+	 * bus) set in the top byte - mask them off to get the real physical
+	 * address, a standard, widely-documented gotcha of this interface. */
+	uint32_t fbPhysAddr = b[kMsgIdxAllocBase] & 0x3FFFFFFF;
+	uint32_t fbSize = b[kMsgIdxAllocRespSize];
+	uint32_t fbPitch = b[kMsgIdxPitchVal];
+	if (fbPhysAddr == 0 || fbSize == 0 || fbPitch == 0) {
+		return FALSE;
+	}
+
+	/* Write-combining, not plain ml_io_map()'s strict-device mapping -
+	 * same reasoning this file's panic-log buffer mapping (search
+	 * ml_io_map_wcomb above) uses: this is a bulk memory buffer another
+	 * agent (the GPU's HDMI scanout engine) reads asynchronously with no
+	 * CPU cache involved, not a register window that needs strict
+	 * per-access ordering. */
+	vm_offset_t fbVirtAddr = ml_io_map_wcomb(fbPhysAddr, fbSize);
+	if (fbVirtAddr == 0) {
+		return FALSE;
+	}
+
+	video->v_baseAddr = fbVirtAddr;
+	video->v_rowBytes = fbPitch;
+	video->v_width = BCM2837_FB_WIDTH;
+	video->v_height = BCM2837_FB_HEIGHT;
+	video->v_depth = BCM2837_FB_DEPTH;
+	video->v_display = 1; /* nonzero -> PE_create_console() picks kPEGraphicsMode */
+	return TRUE;
+}
+
 void
 PE_init_platform(boolean_t vm_initialized, void *args)
 {

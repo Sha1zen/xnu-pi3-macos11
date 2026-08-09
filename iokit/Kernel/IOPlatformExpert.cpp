@@ -1588,6 +1588,7 @@ IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
 
 	if (iter) {
 		while ((next = (IORegistryEntry *) iter->getNextObject())) {
+			IOLog("TEMP DIAGNOSTIC: createNubs saw DT node \"%s\"\n", next->getName() ? next->getName() : "?");
 			if (NULL == (nub = createNub( next ))) {
 				continue;
 			}

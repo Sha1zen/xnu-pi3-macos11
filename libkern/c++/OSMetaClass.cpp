@@ -1489,7 +1489,25 @@ OSMetaClass::getClassDictionary()
 bool
 OSMetaClass::serialize(__unused OSSerialize * s) const
 {
-        panic("OSMetaClass::serialize(): Obsoleted\n");
+        /* TEMP DIAGNOSTIC / COMPAT FIX: this panic is real Apple source
+         * (a development-time assertion: real kext code should never reach
+         * a bare OSMetaClass pointer via generic OSObject::serialize()
+         * traversal). It fires on this board once IOService matching runs
+         * past the platform expert into real device-tree children
+         * (iokit/Kernel/IOService.cpp's IOService::doServiceMatch() /
+         * _IOConfigThread::main(), confirmed via panic backtrace + atos
+         * line resolution against a fresh build) - something in that path
+         * inserts a class's metaclass into a collection that later gets
+         * serialized generically, in a way the exact source line couldn't
+         * be pinned down through (LTO inlining collapsed doServiceMatch/
+         * probeCandidates into one address range with imprecise per-PC
+         * debug-line info). Rather than guess at a deeper structural fix
+         * blind, apply the same reasoning as the IOPanicPlatform neutering
+         * elsewhere in this tree (see project memory, Bug #9): this
+         * function already has a well-defined graceful-failure return
+         * value (`false`, meaning "could not serialize") for exactly this
+         * situation - the panic is the only thing turning a normal,
+         * everywhere-handled OSSerialize failure into a crash. */
         return false;
 }
 

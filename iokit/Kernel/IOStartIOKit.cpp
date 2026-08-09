@@ -196,6 +196,21 @@ InitIOKit(void *dtTop)
 	if (record_startup_extensions_function) {
 		record_startup_extensions_function();
 	}
+
+#ifdef BCM2837
+	/* BCM2837InterruptController/BCM2837SDHCI are compiled directly into
+	 * this kernel (no prelink/kext-cache path exists here to load them as
+	 * real kexts - see iokit/Drivers/BCM2837/BCM2837Personalities.cpp).
+	 * Publishes their IOKitPersonalities by hand since there's no
+	 * Info.plist for OSKext to parse them from. Safe to call here: nubs
+	 * for the "intc"/"sdhci" DT nodes don't exist yet (ConfigureIOKit(),
+	 * called right after InitIOKit() returns, is what creates them), and
+	 * actual matching doesn't start until StartIOKitMatching() much later
+	 * (PE_lockdown_iokit()) - addDrivers()'s doNubMatching handles either
+	 * ordering correctly regardless. */
+	extern void BCM2837RegisterBuiltinPersonalities(void);
+	BCM2837RegisterBuiltinPersonalities();
+#endif
 }
 
 void

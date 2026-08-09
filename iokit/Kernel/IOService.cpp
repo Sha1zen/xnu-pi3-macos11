@@ -1009,6 +1009,7 @@ IOService::registerService( IOOptionBits options )
 		}
 	}
 
+	IOLog("TEMP DIAGNOSTIC: registerService calling startMatching for \"%s\"\n", getName() ? getName() : "?");
 	startMatching( options );
 }
 
@@ -1018,6 +1019,8 @@ IOService::startMatching( IOOptionBits options )
 	IOService * provider;
 	UInt32      prevBusy = 0;
 	bool        needConfig;
+
+	IOLog("TEMP DIAGNOSTIC: startMatching entered for \"%s\" options=%#x\n", getName() ? getName() : "?", options);
 	bool        needWake = false;
 	bool        ok;
 	bool        sync;

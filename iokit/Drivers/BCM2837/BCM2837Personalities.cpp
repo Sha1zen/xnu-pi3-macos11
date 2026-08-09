@@ -1,0 +1,148 @@
+/*
+ * Hand-built IOKitPersonalities for this board's built-in drivers, standing
+ * in for the normal kext-Info.plist -> prelinked-kernel -> gIOCatalogue
+ * pipeline, which does not exist in this bare Mach-O boot path (no
+ * prelink/kext-cache infrastructure - see project memory). All of these
+ * drivers are compiled directly into the kernel (see iokit/conf/files)
+ * rather than as separate loadable kext bundles, so there is no Info.plist
+ * for OSKext to parse; this is the only source of their personalities.
+ *
+ * Two real, separate gaps had to be closed here, discovered in order:
+ *
+ * 1. "intc"/"sdhci" nubs need a personality to match against, same as any
+ *    IOKit driver. IODTPlatformExpert::createNubs()/createNub()
+ *    (iokit/Kernel/IOPlatformExpert.cpp) already turns every device-tree
+ *    node into a real IOPlatformDevice nub and registerService()'s it
+ *    automatically - no board-specific code needed for that part.
+ *
+ * 2. The deeper, initially-missed gap: createNubs() for the top-level tree
+ *    is only ever reached from IODTPlatformExpert::configure() ->
+ *    processTopLevel(), which only runs if some concrete IODTPlatformExpert
+ *    subclass successfully matches AND starts against the *root* nub in
+ *    the first place. IODTPlatformExpert itself is
+ *    OSDeclareAbstractStructors (deleteList()/excludeList() are pure
+ *    virtual) - not instantiable via matching - and this kernel had zero
+ *    personalities (confirmed: "0 kext personality sent to the
+ *    IOCatalogue") before this file existed, except IOPanicPlatform's own
+ *    built-in catch-all (iokit/KernelConfigTables.cpp's
+ *    gIOKernelConfigTables, IOProviderClass=IOPlatformExpertDevice,
+ *    IOProbeScore=0, no IONameMatch - deliberately generic, meant to be
+ *    outscored by a real match). So root itself was only ever "claimed" by
+ *    the neutered panic-platform catch-all (which correctly declines,
+ *    returning false), and processTopLevel() never ran *for any node* -
+ *    confirmed empirically by instrumenting createNubs()/startMatching()
+ *    and seeing it fire exactly once, for "/", never for any child.
+ *    BCM2837PlatformExpert (a trivial concrete IODTPlatformExpert
+ *    subclass, see that file) plus the "root" personality below closes
+ *    this - IOProbeScore is set explicitly higher than IOPanicPlatform's 0
+ *    so it wins outright rather than relying on catalogue ordering.
+ *
+ * IOCatalogue::addDrivers()'s doNubMatching=true retroactively re-matches
+ * already-registered nubs, so this can safely run either before or after
+ * createNubs() - confirmed via IOStartIOKit.cpp/pe_init.c's actual call
+ * order: InitIOKit() (where this runs) completes strictly before
+ * ConfigureIOKit() -> configure() -> processTopLevel() creates the intc/
+ * sdhci nubs, and actual matching doesn't start until StartIOKitMatching()
+ * (PE_lockdown_iokit(), much later), so there's no ordering/race risk
+ * either way. The root nub itself is a special case already created in
+ * InitIOKit() (gRootNub) before our call, so root matching against our
+ * new personality also benefits from doNubMatching's retroactive re-match.
+ */
+
+#include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSArray.h>
+#include <libkern/c++/OSString.h>
+#include <libkern/c++/OSNumber.h>
+#include <IOKit/IOCatalogue.h>
+#include <IOKit/IOKitKeys.h>
+#include <IOKit/IOLib.h>
+
+// score < 0 means "don't set IOProbeScore, use kIODefaultProbeScore".
+static OSDictionary *
+makePersonality(const char *providerClass, const char *ioClass, const char *nameMatch, int score)
+{
+	OSDictionary *dict = OSDictionary::withCapacity(4);
+	if (dict == NULL) {
+		return NULL;
+	}
+
+	OSString *providerClassStr = OSString::withCString(providerClass);
+	OSString *classStr = OSString::withCString(ioClass);
+	OSString *nameMatchStr = OSString::withCString(nameMatch);
+	OSNumber *scoreNum = (score >= 0) ? OSNumber::withNumber(score, 32) : NULL;
+
+	if (providerClassStr == NULL || classStr == NULL || nameMatchStr == NULL ||
+	    (score >= 0 && scoreNum == NULL)) {
+		OSSafeReleaseNULL(providerClassStr);
+		OSSafeReleaseNULL(classStr);
+		OSSafeReleaseNULL(nameMatchStr);
+		OSSafeReleaseNULL(scoreNum);
+		dict->release();
+		return NULL;
+	}
+
+	dict->setObject(kIOProviderClassKey, providerClassStr);
+	dict->setObject(kIOClassKey, classStr);
+	dict->setObject(kIONameMatchKey, nameMatchStr);
+	if (scoreNum != NULL) {
+		dict->setObject(kIOProbeScoreKey, scoreNum);
+		scoreNum->release();
+	}
+
+	providerClassStr->release();
+	classStr->release();
+	nameMatchStr->release();
+
+	return dict;
+}
+
+extern "C" void
+BCM2837RegisterBuiltinPersonalities(void)
+{
+	OSArray *personalities = OSArray::withCapacity(4);
+	if (personalities == NULL) {
+		IOLog("BCM2837RegisterBuiltinPersonalities: OSArray::withCapacity failed\n");
+		return;
+	}
+
+	// Root's own synthesized DT "name" property is "/" (empirically
+	// confirmed via IOService::startMatching's own diagnostic log during
+	// development - the root DT node in devicetrees/rpi3.dts has no
+	// explicit compatible/model/name property, so the ADT compiler's
+	// automatic name-from-node-label synthesis, DT__AddChild() in
+	// third_party/dtc-AppleDeviceTree/AppleDeviceTree.c, gives it "/").
+	// Score 1000 to beat IOPanicPlatform's IOProbeScore=0 outright.
+	OSDictionary *root = makePersonality("IOPlatformExpertDevice", "BCM2837PlatformExpert", "/", 1000);
+	// "arm-io" is the SoC peripheral bus container "intc"/"sdhci" actually
+	// live under (devicetrees/rpi3.dts) - see BCM2837ArmIO.h for why a
+	// driver for it is needed at all before its children can be published.
+	OSDictionary *armio = makePersonality("IOPlatformDevice", "BCM2837ArmIO", "arm-io", -1);
+	OSDictionary *intc = makePersonality("IOPlatformDevice", "BCM2837InterruptController", "intc", -1);
+	OSDictionary *sdhci = makePersonality("IOPlatformDevice", "BCM2837SDHCI", "sdhci", -1);
+
+	if (root != NULL) {
+		personalities->setObject(root);
+		root->release();
+	}
+	if (armio != NULL) {
+		personalities->setObject(armio);
+		armio->release();
+	}
+	if (intc != NULL) {
+		personalities->setObject(intc);
+		intc->release();
+	}
+	if (sdhci != NULL) {
+		personalities->setObject(sdhci);
+		sdhci->release();
+	}
+
+	IOLog("BCM2837RegisterBuiltinPersonalities: built %u personalities, gIOCatalogue=%p\n",
+	    personalities->getCount(), (void *)(IOCatalogue *)gIOCatalogue);
+
+	if (personalities->getCount() > 0) {
+		bool ok = gIOCatalogue->addDrivers(personalities, true);
+		IOLog("BCM2837RegisterBuiltinPersonalities: addDrivers returned %d\n", ok);
+	}
+	personalities->release();
+}

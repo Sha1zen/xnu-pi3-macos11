@@ -37,10 +37,14 @@ iokit/Kernel/IOConditionLock.cpp			optional iokitcpp
 #iokit/Kernel/IORuntime.cpp				optional iokitcpp
 iokit/Kernel/IOStartIOKit.cpp				optional iokitcpp
 
+iokit/Storage/IOStorage.cpp				optional iokitcpp
+iokit/Storage/IOBlockStorageDevice.cpp			optional iokitcpp
+
 iokit/Drivers/BCM2837/BCM2837InterruptController.cpp	optional iokitcpp
-#iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PlatformExpert.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837ArmIO.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837LocalIntc.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Personalities.cpp		optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp

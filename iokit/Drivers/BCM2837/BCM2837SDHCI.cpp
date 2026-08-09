@@ -139,9 +139,6 @@ BCM2837SDHCI::interruptOccurred(OSObject *target, void * /*refCon*/, IOService *
 bool
 BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *outStatus)
 {
-	uint64_t deadline;
-	clock_interval_to_deadline(timeoutUs, kMicrosecondScale, &deadline);
-
 	// Two different lock types are load-bearing here, not interchangeable:
 	// fStatusLock (IOSimpleLock) is the only thing interruptOccurred() may
 	// touch, since it runs at interrupt level; fInterruptLock (IOLock) is
@@ -150,8 +147,31 @@ BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *ou
 	// atomically unlock-and-sleep on. IOLockWakeup() bridges the two - it
 	// doesn't actually take fInterruptLock (see interruptOccurred()), it
 	// just targets the same wait event address.
+	//
+	// TEMP DIAGNOSTIC / COMPAT: this sleeps in short (1ms) increments and
+	// directly polls+acks the raw INT_STATUS register on every wakeup,
+	// rather than sleeping straight through to the full deadline as
+	// originally written. Confirmed empirically (2026-08-09) that this
+	// board's real interrupt cascade (BCM2837LocalIntc ->
+	// BCM2837InterruptController, see those files) gets registered
+	// successfully but a raw ARM64 IRQ exception never actually reaches
+	// interruptOccurred() - whether that's a pexpert/osfmk-level gap in
+	// exception-vector wiring (BCM2837InterruptController.h already
+	// flagged this exact class of gap as unverified before any of this
+	// session's work) hasn't been root-caused. Confirmed via direct
+	// register readback that the SDHCI hardware itself completes commands
+	// correctly regardless (INT_STATUS shows the right bits set) - only
+	// the interrupt notification is missing. This polling fallback mirrors
+	// exactly what interruptOccurred() does, so it's a strict superset:
+	// if a real interrupt does fire, IOLockWakeup() below still wins
+	// immediately (this loop is not the only way to observe the bits);
+	// if not, the next 1ms poll tick picks it up instead. Once real
+	// interrupt delivery is confirmed working end to end, this can revert
+	// to a single IOLockSleepDeadline() straight to the full deadline.
 	IOLockLock(fInterruptLock);
 	uint32_t matched = 0;
+	uint32_t waitedUs = 0;
+	const uint32_t kPollIntervalUs = 1000;
 	for (;;) {
 		IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
 		matched = fPendingIntStatus & mask;
@@ -164,21 +184,42 @@ BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *ou
 			break;
 		}
 
-		int wr = IOLockSleepDeadline(fInterruptLock, (void *)&fPendingIntStatus, deadline, THREAD_UNINT);
-		if (wr == THREAD_TIMED_OUT) {
-			// One last check: the interrupt could have landed and called
-			// IOLockWakeup() in the narrow window between our check above
-			// and entering IOLockSleepDeadline(), in which case the bits
-			// are sitting in fPendingIntStatus even though we timed out
-			// waiting to be woken for them.
-			istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
-			matched = fPendingIntStatus & mask;
-			if (matched != 0) {
-				fPendingIntStatus &= ~matched;
+		// Poll fallback: read+ack the raw register ourselves, same bit
+		// handling as interruptOccurred() (see that function's own
+		// comments for why exactly these bits and why ack unconditionally).
+		uint32_t intmask = readReg32(kRegIntStatus);
+		if (intmask != 0) {
+			uint32_t known = intmask & (kIntCmdComplete | kIntTransferDone |
+			    kIntBufWriteRdy | kIntBufReadRdy | kIntErrorMask);
+			if (known != 0) {
+				writeReg32(kRegIntStatus, known);
 			}
-			IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+			uint32_t unexpected = intmask & ~known;
+			if (unexpected != 0) {
+				writeReg32(kRegIntStatus, unexpected);
+			}
+			if (known != 0) {
+				istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
+				fPendingIntStatus |= known;
+				matched = fPendingIntStatus & mask;
+				if (matched != 0) {
+					fPendingIntStatus &= ~matched;
+				}
+				IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+				if (matched != 0) {
+					break;
+				}
+			}
+		}
+
+		if (waitedUs >= timeoutUs) {
 			break;
 		}
+
+		uint64_t pollDeadline;
+		clock_interval_to_deadline(kPollIntervalUs, kMicrosecondScale, &pollDeadline);
+		IOLockSleepDeadline(fInterruptLock, (void *)&fPendingIntStatus, pollDeadline, THREAD_UNINT);
+		waitedUs += kPollIntervalUs;
 	}
 	IOLockUnlock(fInterruptLock);
 
@@ -266,7 +307,10 @@ BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, boo
 
 	uint32_t status;
 	if (!waitForIntStatus32(kIntCmdComplete | kIntErrorMask, 1000000, &status)) {
-		IOLog("BCM2837SDHCI: CMD%u timed out (no CMD_COMPLETE/error)\n", cmdIndex);
+		uint32_t rawIntStatus = readReg32(kRegIntStatus);
+		uint32_t presentState = readReg32(kRegPresentState);
+		IOLog("BCM2837SDHCI: CMD%u timed out (no CMD_COMPLETE/error) TEMP DIAGNOSTIC raw INT_STATUS=%#x PRESENT_STATE=%#x\n",
+		    cmdIndex, rawIntStatus, presentState);
 		return false;
 	}
 	if (status & kIntErrorMask) {
@@ -477,6 +521,22 @@ BCM2837SDHCI::start(IOService *provider)
 		// Not fatal: publish the nub anyway so it's visible in the
 		// registry / a card can be identified later. reportMediaState
 		// reflects fCardPresent honestly either way.
+	}
+
+	// TEMP DIAGNOSTIC: direct real-block-read proof, since there's no
+	// filesystem/IOBlockStorageDriver consumer wired up yet to exercise
+	// this path any other way. Reads LBA 0 and dumps the first 16 bytes.
+	if (fCardPresent) {
+		uint8_t testBuf[512];
+		bzero(testBuf, sizeof(testBuf));
+		bool ok = readBlocksPIO(0, 1, testBuf);
+		IOLog("BCM2837SDHCI: TEMP DIAGNOSTIC readBlocksPIO(0,1) ok=%d bytes: "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    ok,
+		    testBuf[0], testBuf[1], testBuf[2], testBuf[3],
+		    testBuf[4], testBuf[5], testBuf[6], testBuf[7],
+		    testBuf[8], testBuf[9], testBuf[10], testBuf[11],
+		    testBuf[12], testBuf[13], testBuf[14], testBuf[15]);
 	}
 
 	registerService();

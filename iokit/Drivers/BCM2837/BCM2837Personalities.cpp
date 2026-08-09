@@ -99,7 +99,7 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 extern "C" void
 BCM2837RegisterBuiltinPersonalities(void)
 {
-	OSArray *personalities = OSArray::withCapacity(4);
+	OSArray *personalities = OSArray::withCapacity(5);
 	if (personalities == NULL) {
 		IOLog("BCM2837RegisterBuiltinPersonalities: OSArray::withCapacity failed\n");
 		return;
@@ -113,6 +113,11 @@ BCM2837RegisterBuiltinPersonalities(void)
 	// third_party/dtc-AppleDeviceTree/AppleDeviceTree.c, gives it "/").
 	// Score 1000 to beat IOPanicPlatform's IOProbeScore=0 outright.
 	OSDictionary *root = makePersonality("IOPlatformExpertDevice", "BCM2837PlatformExpert", "/", 1000);
+	// "local-intc" - top of the interrupt tree, root-level sibling of
+	// "arm-io" (see devicetrees/rpi3.dts header comment on that node for
+	// why it isn't nested under arm-io). "intc"'s own upstream interrupt
+	// cascades into this controller - see BCM2837LocalIntc.h.
+	OSDictionary *localIntc = makePersonality("IOPlatformDevice", "BCM2837LocalIntc", "local-intc", -1);
 	// "arm-io" is the SoC peripheral bus container "intc"/"sdhci" actually
 	// live under (devicetrees/rpi3.dts) - see BCM2837ArmIO.h for why a
 	// driver for it is needed at all before its children can be published.
@@ -123,6 +128,10 @@ BCM2837RegisterBuiltinPersonalities(void)
 	if (root != NULL) {
 		personalities->setObject(root);
 		root->release();
+	}
+	if (localIntc != NULL) {
+		personalities->setObject(localIntc);
+		localIntc->release();
 	}
 	if (armio != NULL) {
 		personalities->setObject(armio);

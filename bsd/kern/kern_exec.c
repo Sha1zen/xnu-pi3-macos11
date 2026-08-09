@@ -1827,6 +1827,9 @@ again:
 		*imgp->ip_origvattr = *imgp->ip_vattr;
 	}
 
+	printf("TEMP DIAGNOSTIC: exec_activate_image about to vn_rdwr, ip_vp=%p vtype=%d excpath=%s\n",
+	    (void *)imgp->ip_vp, imgp->ip_vp ? vnode_vtype(imgp->ip_vp) : -1, excpath);
+
 	error = vn_rdwr(UIO_READ, imgp->ip_vp, imgp->ip_vdata, PAGE_SIZE, 0,
 	    UIO_SYSSPACE, IO_NODELOCKED,
 	    vfs_context_ucred(imgp->ip_vfs_context),
@@ -1838,6 +1841,18 @@ again:
 	if (resid) {
 		memset(imgp->ip_vdata + (PAGE_SIZE - resid), 0x0, resid);
 	}
+
+	printf("TEMP DIAGNOSTIC: exec_activate_image read %d bytes (resid=%d), first 16: "
+	    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    (int)(PAGE_SIZE - resid), resid,
+	    (unsigned char)imgp->ip_vdata[0], (unsigned char)imgp->ip_vdata[1],
+	    (unsigned char)imgp->ip_vdata[2], (unsigned char)imgp->ip_vdata[3],
+	    (unsigned char)imgp->ip_vdata[4], (unsigned char)imgp->ip_vdata[5],
+	    (unsigned char)imgp->ip_vdata[6], (unsigned char)imgp->ip_vdata[7],
+	    (unsigned char)imgp->ip_vdata[8], (unsigned char)imgp->ip_vdata[9],
+	    (unsigned char)imgp->ip_vdata[10], (unsigned char)imgp->ip_vdata[11],
+	    (unsigned char)imgp->ip_vdata[12], (unsigned char)imgp->ip_vdata[13],
+	    (unsigned char)imgp->ip_vdata[14], (unsigned char)imgp->ip_vdata[15]);
 
 encapsulated_binary:
 	/* Limit the number of iterations we will attempt on each binary */

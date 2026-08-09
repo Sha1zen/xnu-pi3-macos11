@@ -238,7 +238,37 @@ int msdosfs_vfs_mount(struct mount *mp, vnode_t devvp, user_addr_t data, vfs_con
 	OSKextRetainKextWithLoadTag(OSKextGetCurrentLoadTag());
 #endif
 	
-	error = copyin(data, &args, sizeof(struct msdosfs_args));
+	/*
+	 * TEMP DIAGNOSTIC: real macOS never mounts FAT as root, so this
+	 * always has a real user-supplied `data` pointer with real mount
+	 * arguments (even automatic mounts go through a real mount(2) call).
+	 * Our root-mount path (vfs_mountroot() -> VFS_MOUNT(mp, rootvp, 0,
+	 * ctx)) legitimately passes data=0/NULL - copyin(NULL, ...) faults
+	 * (EFAULT), a real gap in this vintage's msdosfs never exercised
+	 * upstream. The code below already has a "no valid args" fallback
+	 * (args.magic != MSDOSFS_ARGSMAGIC -> args.flags = 0) - just needs
+	 * to reach it without copyin()'ing a null pointer first.
+	 */
+	if (data == USER_ADDR_NULL) {
+		bzero(&args, sizeof(args));
+		/*
+		 * FAT has no real Unix permission bits at all (see project
+		 * memory: docs/multiuser-userland-plan.md) - pmp->pm_mask
+		 * (set from args.mask below) is ANDed directly into every
+		 * reported file's va_mode (msdosfs_vnop_getattr(),
+		 * msdosfs_vnops.c: "ALLPERMS & pmp->pm_mask") with no other
+		 * source of permission bits. Leaving mask=0 (this struct's
+		 * bzero default) makes every file report mode 000 - harmless
+		 * for reads (root can still read anything) but silently
+		 * blocks exec() (EACCES, no X bit). Real mounts always
+		 * supply a real mask via mount args; use a normal default
+		 * (0755) for this synthetic root-mount case.
+		 */
+		args.mask = 0755;
+		error = 0;
+	} else {
+		error = copyin(data, &args, sizeof(struct msdosfs_args));
+	}
 	if (error)
 		goto error_exit;
 	if (args.magic != MSDOSFS_ARGSMAGIC)
@@ -1589,7 +1619,14 @@ int msdosfs_module_start(kmod_info_t *ki, void *data)
 	vfe.vfe_vopcnt = 2;		/* We just have vnode operations for regular files and directories, and the FAT */
 	vfe.vfe_opvdescs = msdosfs_vnodeop_opv_desc_list;
 	strlcpy(vfe.vfe_fsname, "msdos", sizeof(vfe.vfe_fsname));
-	vfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED;
+	/*
+	 * TEMP DIAGNOSTIC: real macOS never mounts FAT as root (only real
+	 * APFS/HFS+ ever back the boot volume), so this flag was never set
+	 * upstream - vfs_mountroot() (bsd/vfs/vfs_subr.c) skips any fs table
+	 * entry lacking it. This board's root volume genuinely is FAT32 (see
+	 * project memory), so opt in.
+	 */
+	vfe.vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLNOTYPENUM | VFS_TBLLOCALVOL | VFS_TBL64BITREADY | VFS_TBLREADDIR_EXTENDED | VFS_TBLCANMOUNTROOT;
 	vfe.vfe_reserv[0] = 0;
 	vfe.vfe_reserv[1] = 0;
 	

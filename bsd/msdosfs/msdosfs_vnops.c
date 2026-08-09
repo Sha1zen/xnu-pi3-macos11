@@ -780,11 +780,18 @@ int msdosfs_vnop_read(struct vnop_read_args *ap)
 		return 0;
 
 	lck_mtx_lock(dep->de_lock);
-	
+
 	KERNEL_DEBUG_CONSTANT(MSDOSFS_VNOP_READ|DBG_FUNC_START, dep, uio_offset(uio), uio_resid(uio), dep->de_FileSize, 0);
+
+	printf("TEMP DIAGNOSTIC: msdosfs_vnop_read vp=%p isreg=%d de_StartCluster=%u de_FileSize=%u "
+	    "offset=%lld resid=%lld\n",
+	    (void *)vp, vnode_isreg(vp), dep->de_StartCluster, dep->de_FileSize,
+	    (long long)uio_offset(uio), (long long)uio_resid(uio));
 
 	if (vnode_isreg(vp)) {
 		error = cluster_read(vp, uio, (off_t)dep->de_FileSize, ap->a_ioflag);
+		printf("TEMP DIAGNOSTIC: msdosfs_vnop_read cluster_read returned %d, resid now %lld\n",
+		    error, (long long)uio_resid(uio));
 		if (error == 0 && (vfs_flags(pmp->pm_mountp) & (MNT_RDONLY | MNT_NOATIME)) == 0)
 			dep->de_flag |= DE_ACCESS;
 	}
@@ -1590,7 +1597,7 @@ int msdosfs_vnop_rename(struct vnop_rename_args *ap)
 	else
 	{
         error = msdosfs_uniqdosname(tddep, toname, needs_generation ? to_diroffset - to_long_count * sizeof(struct dosdirentry) : 1, context);
-        /*¥ What if we get an error and we already deleted the target? */
+        /*ï¿½ What if we get an error and we already deleted the target? */
         if (error)
 		{
 			if (DEBUG) panic("msdosfs_vnop_rename: msdosfs_uniqdosname returned %d\n", error);
@@ -1632,7 +1639,7 @@ int msdosfs_vnop_rename(struct vnop_rename_args *ap)
 	{
 		if (DEBUG) panic("msdosfs_vnop_rename: msdosfs_createde returned %d\n", error);
 		bcopy(oldname, fdep->de_Name, SHORT_NAME_LEN);
-		/*¥ What if we already deleted the target? */
+		/*ï¿½ What if we already deleted the target? */
 		/* And shouldn't we also restore fdep->de_LowerCase? */
 		goto flush_exit;
 	}
@@ -2419,10 +2426,16 @@ int msdosfs_vnop_blockmap(struct vnop_blockmap_args *ap)
     /* Find the physical (device) block where that cluster starts */
     error = msdosfs_pcbmap(dep, cn, numclusters, &bn, NULL, &runsize);
 
+    printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap de_StartCluster=%u foffset=%lld cn=%u "
+        "pcbmap_error=%d bn(pre-adjust)=%lld runsize=%u\n",
+        dep->de_StartCluster, (long long)ap->a_foffset, cn, error, (long long)bn, runsize);
+
     /* Add the offset in physical (device) blocks from the start of the cluster */
     bn += (((uint32_t)ap->a_foffset - de_cn2off(pmp, cn)) >> pmp->pm_bnshift);
     runsize -= ((uint32_t)ap->a_foffset - (de_cn2off(pmp, cn)));
-    
+
+    printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap bn(final)=%lld\n", (long long)bn);
+
     *ap->a_bpn = bn;
 	if (error == 0 && ap->a_run) {
 		if (runsize > ap->a_size)

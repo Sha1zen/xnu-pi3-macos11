@@ -1548,8 +1548,6 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
 			map = thread->map;
 			interruptible = THREAD_ABORTSAFE;
 		}
-		printf("TEMP DIAGNOSTIC: handle_kernel_abort fault_addr=%#lx thread=%p map=%p kernel_map=%p\n",
-		    (unsigned long)fault_addr, (void *)thread, (void *)map, (void *)kernel_map);
 
 #if CONFIG_PGTRACE
 		if (pgtrace_enabled) {

@@ -831,6 +831,28 @@ bsd_init(void)
 	}
 #endif
 
+#if MSDOSFS
+	/* Same situation as HFS+ above: real macOS's msdosfs.kext registers
+	 * itself via vfs_fsadd() from msdosfs_module_start() (bsd/msdosfs/
+	 * msdosfs_vfsops.c), the real kext-load entry point - never called
+	 * since this project has no kext-loading infrastructure at all. This
+	 * went unnoticed for a while because mockfs (now disabled - see
+	 * config/MASTER.arm64.bcm2837) was intercepting vfs_mountroot()
+	 * before msdosfs was ever needed; once mockfs was disabled,
+	 * vfs_mountroot() correctly tried every *registered* mountroot-
+	 * capable filesystem (confirmed via temporary per-vfsconf-entry
+	 * diagnostic logging) and msdosfs simply never appeared in that
+	 * list at all - it had never been added to vfsconf in the first
+	 * place. */
+	{
+		extern int msdosfs_module_start(void *ki, void *data);
+		int msdosfs_init_err = msdosfs_module_start(NULL, NULL);
+		if (msdosfs_init_err) {
+			printf("msdosfs_module_start failed: %d\n", msdosfs_init_err);
+		}
+	}
+#endif
+
 	/* Initialize file locks. */
 	bsd_init_kprintf("calling lf_init\n");
 	lf_init();

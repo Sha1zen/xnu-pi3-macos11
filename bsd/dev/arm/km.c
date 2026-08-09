@@ -253,15 +253,26 @@ fallthrough:
  *		assumptions here, this routine should be static (and
  *		inlined, given there is only one call site).
  */
+/* TEMP DIAGNOSTIC: externally inspectable via QEMU monitor (nm this kernel
+ * for the symbol, then `xp/1xw <addr>` on the guest VA) - counts real
+ * kmputc() calls and, separately, calls that were gated off, to isolate
+ * whether userspace /dev/console writes ever reach this function at all.
+ * See project memory (SHELL MILESTONE section). Remove once resolved. */
+volatile unsigned int g_kmputc_calls;
+volatile unsigned int g_kmputc_gated_off;
+
 int
 kmputc(__unused dev_t dev, char c)
 {
 	if (!disableConsoleOutput && initialized) {
+		g_kmputc_calls++;
 		/* OCRNL */
 		if (c == '\n') {
 			cnputcusr('\r');
 		}
 		cnputcusr(c);
+	} else {
+		g_kmputc_gated_off++;
 	}
 
 	return 0;

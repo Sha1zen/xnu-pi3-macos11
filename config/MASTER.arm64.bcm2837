@@ -27,8 +27,24 @@
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  FILESYS_BASE =   [ devfs fifo fs_compression config_protect config_mnt_rootsnap config_fse routefs namedstreams bindfs]
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
-#  FILESYS_DEV =    [ FILESYS_BASE fdesc mockfs msdosfs hfs ]
-#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc mockfs msdosfs hfs ]
+#  FILESYS_DEV =    [ FILESYS_BASE fdesc msdosfs hfs ]
+#  FILESYS_DEBUG =  [ FILESYS_BASE fdesc msdosfs hfs ]
+#  "mockfs" disabled 2026-08-09: real root cause of "/sbin/launchd" exec
+#  returning ENOEXEC (errno 8) - mockfs's own header comment (bsd/miscfs/
+#  mockfs/mockfs.h) says it all: it "makes the assumption that our root
+#  device is in fact a mach-o file" and provides a single synthetic vnode
+#  "representing the root device" - i.e. it treats the ENTIRE raw root
+#  device as one big Mach-O file starting at byte 0, with no real
+#  filesystem parsing at all. It was enabled from an earlier project
+#  phase (booting a bare Mach-O blob directly, before real SD card
+#  support existed - see project memory) and, left enabled alongside
+#  msdosfs, was winning vfs_mountroot()'s filesystem selection - every
+#  file lookup silently returned raw device bytes (the FAT32 boot
+#  sector at LBA 0) instead of going through real msdosfs. Now that we
+#  have a real formatted FAT32 (or HFS+) SD card, mockfs's "whole device
+#  is one Mach-O" model no longer applies - disabled so msdosfs wins
+#  mountroot selection instead. Re-enable only if reverting to a raw
+#  Mach-O-blob boot image with no real filesystem on it.
 #  "hfs" re-enabled 2026-08-09: the previously-suspected SETUP/config
 #  OBJS-dropping bug did not reproduce under a from-scratch doconf/config
 #  dry run (all 38 bsd/hfs/*.o showed up correctly) or under a real full

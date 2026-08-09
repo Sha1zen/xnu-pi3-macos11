@@ -139,7 +139,21 @@ SECURITY_READ_ONLY_EARLY(uint32_t) nconsops = (sizeof cons_ops / sizeof cons_ops
 #if __x86_64__
 uint32_t cons_ops_index = VC_CONS_OPS;
 #else
-SECURITY_READ_ONLY_LATE(uint32_t) cons_ops_index = VC_CONS_OPS;
+/* COMPAT: real ARM targets default to VC_CONS_OPS (video console) here.
+ * This board's framebuffer (bcm2837_video_init(), pexpert/arm/pe_init.c)
+ * is only a mailbox handshake, never visually verified end-to-end - see
+ * project memory. Meanwhile every other milestone in this project
+ * (including kprintf/IOLog, which use a separate direct-serial path, not
+ * this one) is verified headless over the emulated serial UART. Default
+ * to SERIAL_CONS_OPS so /dev/console (cnputc/console_write, what
+ * userspace read()/write() on fd 0-2 actually goes through) lands
+ * somewhere observable too, instead of silently going to a framebuffer
+ * nothing captures with -display none. Root-caused 2026-08-09: a
+ * from-scratch shell process was confirmed alive, printing its banner+
+ * prompt via real write(1,...) calls and genuinely blocked on read(0,...)
+ * for input - just invisible, because cons_ops_index pointed at video.
+ */
+SECURITY_READ_ONLY_LATE(uint32_t) cons_ops_index = SERIAL_CONS_OPS;
 #endif
 
 LCK_GRP_DECLARE(console_lck_grp, "console");

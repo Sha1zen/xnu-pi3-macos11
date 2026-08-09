@@ -48,6 +48,7 @@ iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PlatformExpert.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837ArmIO.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837LocalIntc.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837CPU.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Personalities.cpp		optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp

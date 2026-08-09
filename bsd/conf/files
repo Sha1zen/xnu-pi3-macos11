@@ -452,6 +452,7 @@ bsd/pthread/pthread_priority.c		standard
 bsd/pthread/pthread_workqueue.c		standard
 
 bsd/kern/bsd_init.c			standard
+bsd/kern/bsd_pthread_stub.c		standard
 ./init_sysent.c				standard
 bsd/kern/kdebug.c			standard
 bsd/kern/kern_acct.c			standard

@@ -174,12 +174,15 @@ devfs_mount(struct mount *mp, __unused vnode_t devvp, __unused user_addr_t data,
 	struct devfsmount *devfs_mp_p;  /* devfs specific mount info */
 	int error;
 
+	printf("TEMP DIAGNOSTIC: devfs_mount entered, mp=%p\n", (void *)mp);
+
 	/*-
 	 *  If they just want to update, we don't need to do anything.
 	 */
 	if (mp->mnt_flag & MNT_UPDATE) {
 		return 0;
 	}
+	printf("TEMP DIAGNOSTIC: devfs_mount past MNT_UPDATE check\n");
 
 	/* Advisory locking should be handled at the VFS layer */
 	vfs_setlocklocal(mp);
@@ -197,18 +200,24 @@ devfs_mount(struct mount *mp, __unused vnode_t devvp, __unused user_addr_t data,
 	}
 	bzero(devfs_mp_p, sizeof(*devfs_mp_p));
 	devfs_mp_p->mount = mp;
+	printf("TEMP DIAGNOSTIC: devfs_mount past MALLOC/bzero, devfs_mp_p=%p\n", (void *)devfs_mp_p);
 
 	/*-
 	 *  Fill out some fields
 	 */
 	__IGNORE_WCASTALIGN(mp->mnt_data = (qaddr_t)devfs_mp_p);
+	printf("TEMP DIAGNOSTIC: about to call VM_KERNEL_ADDRHASH\n");
 	mp->mnt_vfsstat.f_fsid.val[0] = (int32_t)VM_KERNEL_ADDRHASH(devfs_mp_p);
+	printf("TEMP DIAGNOSTIC: past VM_KERNEL_ADDRHASH\n");
 	mp->mnt_vfsstat.f_fsid.val[1] = vfs_typenum(mp);
+	printf("TEMP DIAGNOSTIC: past vfs_typenum\n");
 	mp->mnt_flag |= MNT_LOCAL;
 
+	printf("TEMP DIAGNOSTIC: about to call dev_dup_plane\n");
 	DEVFS_LOCK();
 	error = dev_dup_plane(devfs_mp_p);
 	DEVFS_UNLOCK();
+	printf("TEMP DIAGNOSTIC: past dev_dup_plane, error=%d\n", error);
 
 	if (error) {
 		mp->mnt_data = (qaddr_t)0;

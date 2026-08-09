@@ -893,6 +893,18 @@ bsd_init(void)
 	bsd_init_kprintf("calling psem_lock_init\n");
 	psem_lock_init();
 
+	{
+		/* Real macOS's pthread.kext registers the pthread_functions
+		 * vtable at kext-load time, before this call; we have no
+		 * kext loading at all, and that kext's real implementation
+		 * was never open-sourced (same situation as launchd -
+		 * see project memory). Register a minimal stand-in
+		 * (bsd/kern/bsd_pthread_stub.c) so pthread_init() doesn't
+		 * panic outright ("pthread kernel extension not loaded").
+		 */
+		extern void bsd_pthread_stub_register(void);
+		bsd_pthread_stub_register();
+	}
 	pthread_init();
 	/* POSIX Shm and Sem */
 	bsd_init_kprintf("calling pshm_cache_init\n");
@@ -923,7 +935,16 @@ bsd_init(void)
 	domaininit();
 	iptap_init();
 #if FLOW_DIVERT
+	/*
+	 * flow_divert_init() (bsd/netinet/flow_divert.c) unconditionally
+	 * VERIFY()s pffindproto(AF_INET, IPPROTO_TCP, SOCK_STREAM) != NULL -
+	 * same inet-is-out-of-scope reasoning as uipc_domain.c's
+	 * domaininit() (see that file) - this board has no network
+	 * interface at all, INET/INET6 domains aren't registered.
+	 */
+#if 0
 	flow_divert_init();
+#endif
 #endif  /* FLOW_DIVERT */
 #endif /* SOCKETS */
 #if NETWORKING

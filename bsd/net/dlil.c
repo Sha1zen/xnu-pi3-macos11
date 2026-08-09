@@ -7405,6 +7405,18 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	 * is recycled or reattached.
 	 */
 #if INET
+	/*
+	 * TEMP DIAGNOSTIC / consistent with uipc_domain.c's domaininit():
+	 * this board has no network interface and INET/INET6 domain
+	 * registration is disabled there (see that file's comment) - so
+	 * igmp_init() (one of inetsw[]'s per-protocol pr_init callbacks)
+	 * never runs, and igi_alloc() here (bsd/netinet/igmp.c) allocates
+	 * from an uninitialized zone, crashing on the very first
+	 * ifnet_attach() call (loopback). Skip IGMP attach here for the
+	 * same reason - this is a direct, expected downstream consequence
+	 * of that decision, not a new/separate bug.
+	 */
+	if (0) {
 	if (IGMP_IFINFO(ifp) == NULL) {
 		IGMP_IFINFO(ifp) = igmp_domifattach(ifp, Z_WAITOK);
 		VERIFY(IGMP_IFINFO(ifp) != NULL);
@@ -7412,13 +7424,23 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 		VERIFY(IGMP_IFINFO(ifp)->igi_ifp == ifp);
 		igmp_domifreattach(IGMP_IFINFO(ifp));
 	}
+	}
 #endif /* INET */
+	/*
+	 * TEMP DIAGNOSTIC: same reasoning as the IGMP block above - mld_init()
+	 * (inet6's analogous per-protocol pr_init, IPv6 multicast) never runs
+	 * since INET6 domain registration is disabled (uipc_domain.c). Not
+	 * guarded by #if INET since MLD is IPv6-side, but this project has
+	 * INET6 in the same disabled state as INET.
+	 */
+	if (0) {
 	if (MLD_IFINFO(ifp) == NULL) {
 		MLD_IFINFO(ifp) = mld_domifattach(ifp, Z_WAITOK);
 		VERIFY(MLD_IFINFO(ifp) != NULL);
 	} else {
 		VERIFY(MLD_IFINFO(ifp)->mli_ifp == ifp);
 		mld_domifreattach(MLD_IFINFO(ifp));
+	}
 	}
 
 	VERIFY(ifp->if_data_threshold == 0);

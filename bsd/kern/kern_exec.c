@@ -6385,7 +6385,15 @@ load_init_program(proc_t p)
 	mach_vm_offset_t scratch_addr = 0;
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
-	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+	printf("TEMP DIAGNOSTIC: load_init_program p=%p task=%p thread=%p map=%p kernel_map=%p\n",
+	    (void *)p, (void *)current_task(), (void *)current_thread(), (void *)map,
+	    (void *)kernel_map);
+
+	{
+		kern_return_t scratch_kr = mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+		printf("TEMP DIAGNOSTIC: mach_vm_allocate_kernel kr=%d scratch_addr=%#llx map=%p map_page_size=%#llx\n",
+		    scratch_kr, (unsigned long long)scratch_addr, (void *)map, (unsigned long long)map_page_size);
+	}
 #if CONFIG_MEMORYSTATUS
 	(void) memorystatus_init_at_boot_snapshot();
 #endif /* CONFIG_MEMORYSTATUS */

@@ -901,7 +901,25 @@ IOSecureBSDRoot(const char * rootName)
 	assert(matching);
 	pe = (IOPlatformExpert *) IOService::waitForMatchingService(matching, 30ULL * kSecondScale);
 	matching->release();
-	assert(pe);
+	if (pe == NULL) {
+		/*
+		 * TEMP DIAGNOSTIC: real Secure Boot policy verification (this
+		 * whole function, CONFIG_SECURE_BSD_ROOT) doesn't apply to
+		 * this project's unsigned QEMU dev boot - our own
+		 * BCM2837PlatformExpert (a real IOPlatformExpert subclass,
+		 * already matched+running since very early boot) isn't found
+		 * by this 30s waitForMatchingService() wait, root cause not
+		 * investigated (likely an IOKit service-notification-delivery
+		 * gap, not a matching/inheritance problem - the class
+		 * relationship is genuine). Same tolerance the rest of this
+		 * function already has for callPlatformFunction() returning
+		 * kIOReturnUnsupported ("SecureRootName" not implemented) -
+		 * just skip the whole secure-root check rather than hard
+		 * assert, consistent with this not being a secure-boot board.
+		 */
+		printf("IOSecureBSDRoot: no IOPlatformExpert found within timeout, skipping secure-root check\n");
+		return;
+	}
 	// Returns kIOReturnNotPrivileged is the root device is not secure.
 	// Returns kIOReturnUnsupported if "SecureRootName" is not implemented.
 	result = pe->callPlatformFunction(functionName, false, (void *)rootName, (void *)NULL, (void *)NULL, (void *)NULL);

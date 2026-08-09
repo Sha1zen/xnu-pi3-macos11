@@ -105,7 +105,19 @@ hfs_vfsinit(void)
 	}
 
 	hfs_init_zones();
-	hfs_sysctl_register();
+	/*
+	 * NOT calling hfs_sysctl_register() here: HFS_SYSCTL()'s macro (hfs.h)
+	 * already registers every oid through the normal SYSCTL_* linker-set
+	 * mechanism, auto-scanned once at kernel boot - real Apple's dual
+	 * registration (linker-set AND this manual re-registration list) only
+	 * both fire because real hfs.kext is a separately-loaded kext whose
+	 * code isn't present in the kernel image at boot-scan time, so it
+	 * needs the manual path at kext-load time instead. We compile HFS+
+	 * directly into the monolithic kernel image, so the automatic path
+	 * already ran during bsd_init()'s earlier sysctl bootstrap - calling
+	 * hfs_sysctl_register() here double-registers every oid and panics
+	 * ("attempting to register a sysctl at previously registered slot").
+	 */
 
 	return 0;
 }

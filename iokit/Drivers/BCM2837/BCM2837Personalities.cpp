@@ -105,7 +105,7 @@ makePersonality(const char *providerClass, const char *ioClass, const char *name
 extern "C" void
 BCM2837RegisterBuiltinPersonalities(void)
 {
-	OSArray *personalities = OSArray::withCapacity(6);
+	OSArray *personalities = OSArray::withCapacity(8);
 	if (personalities == NULL) {
 		IOLog("BCM2837RegisterBuiltinPersonalities: OSArray::withCapacity failed\n");
 		return;
@@ -146,6 +146,13 @@ BCM2837RegisterBuiltinPersonalities(void)
 	// device lookup (IOFindBSDRoot()/mountroot, "rd=disk0" boot-args) to
 	// find our whole-disk IOMedia at all.
 	OSDictionary *mediaBSDClient = makePersonality("IOMedia", "IOMediaBSDClient", NULL, -1);
+	// "cpu0" - closes the real ARM64-IRQ-delivery gap found investigating
+	// why BCM2837SDHCI never sees a real interrupt reach handleInterrupt()
+	// despite the hardware genuinely raising it: nothing ever called
+	// ml_install_interrupt_handler() (osfmk/arm64/machine_routines.c) for
+	// this CPU, so sleh_irq() had nothing real to dispatch to. See
+	// BCM2837CPU.h for the full chain.
+	OSDictionary *cpu0 = makePersonality("IOPlatformDevice", "BCM2837CPU", "cpu0", -1);
 
 	if (root != NULL) {
 		personalities->setObject(root);
@@ -170,6 +177,19 @@ BCM2837RegisterBuiltinPersonalities(void)
 	if (blockStorageDriver != NULL) {
 		personalities->setObject(blockStorageDriver);
 		blockStorageDriver->release();
+	}
+	if (mediaBSDClient != NULL) {
+		// TEMP DIAGNOSTIC / real bug fix: this personality was built but
+		// never added to the array before this fix - IOMediaBSDClient
+		// never actually matched/started, so /dev/diskN was never
+		// created, which would have silently defeated FAT32/HFS+ root
+		// mount regardless of anything else in the boot path.
+		personalities->setObject(mediaBSDClient);
+		mediaBSDClient->release();
+	}
+	if (cpu0 != NULL) {
+		personalities->setObject(cpu0);
+		cpu0->release();
 	}
 
 	IOLog("BCM2837RegisterBuiltinPersonalities: built %u personalities, gIOCatalogue=%p\n",

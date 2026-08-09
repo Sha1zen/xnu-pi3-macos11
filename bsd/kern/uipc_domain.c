@@ -762,10 +762,37 @@ domaininit(void)
 	 * means that domains added after this point won't get their
 	 * dom_rtattach() called on rt_tables[].
 	 */
+	/*
+	 * TEMP DIAGNOSTIC / real scope decision, not a bug fix: this board
+	 * has no network interface of any kind (no Ethernet MAC - routed
+	 * through a DWC2 USB host controller this project has never built,
+	 * see project memory/docs/sd-and-ethernet-plan.md) and has never
+	 * attempted real TCP/IP - a working inet/inet6 domain would have
+	 * nothing to bind to regardless. in_dinit()->ip_init() crashes the
+	 * first time it's ever exercised (this is the first time
+	 * bsd_init()/domaininit() has ever run in this project's history);
+	 * root-causing the entire real Apple IPv4 stack bootstrap is out of
+	 * scope for the current goal (root-mount + shell). Skip registering
+	 * these two domains for now - localdomain_s (UNIX domain sockets)
+	 * and systemdomain_s stay registered, they're needed for more than
+	 * networking. Revisit once real Ethernet exists.
+	 */
+#if 0
 	attach_domain(&inetdomain_s);
 	attach_domain(&inet6domain_s);
+#endif
 #if MULTIPATH
+	/*
+	 * mptcp_init() (bsd/netinet/mptcp_subr.c) unconditionally requires
+	 * PF_INET's IPPROTO_TCP protosw to already exist ("Since PF_MULTIPATH
+	 * gets initialized after PF_INET/INET6, we must be able to find
+	 * IPPROTO_TCP entries for both" - its own comment) - VERIFY()-panics
+	 * otherwise. Same inet-is-out-of-scope reasoning as above; MULTIPATH
+	 * TCP inherently cannot function without INET regardless.
+	 */
+#if 0
 	attach_domain(&mpdomain_s);
+#endif
 #endif /* MULTIPATH */
 	attach_domain(&systemdomain_s);
 	attach_domain(&localdomain_s);

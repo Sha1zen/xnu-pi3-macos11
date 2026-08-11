@@ -64,19 +64,29 @@ _pgtrace_clear_probe
 _mach_bridge_recv_timestamps
 _mach_bridge_init_timestamp
 _mach_bridge_set_params
-_pmap_iommu_init
-_pmap_iommu_iovmalloc
-_pmap_iommu_map
-_pmap_iommu_unmap
-_pmap_iommu_iovmfree
-_pmap_iommu_ioctl
-_pmap_iommu_grant_page
-_pmap_iommu_alloc_contiguous_pages
-_nvme_ppl_get_desc
-_sart_get_desc
-_t8020dart_get_desc
-_t8020dart_vo_tte
-_uat_get_desc
+# pmap_iommu_*, nvme_ppl, sart, t8020dart, uat - real Apple Silicon
+# (T8020/M1) DART/SART/UAT IOMMU glue. This xnu-7195.81.3 public source
+# drop declares these exports but never ships their implementation
+# (closed-source gap, same class as the missing pthread.kext/corecrypto
+# gaps documented elsewhere in this project, not something BCM2837 board
+# work removed). check_all_exports (config/Makefile) fails outright on a
+# stock, unmodified checkout of this tree for any arm64 build without
+# this trim, confirmed by reverting all local changes and reproducing the
+# same failure. No board-specific config gate exists to skip them since
+# real macOS/iOS links against Apple's internal, unreleased implementation.
+#_pmap_iommu_init
+#_pmap_iommu_iovmalloc
+#_pmap_iommu_map
+#_pmap_iommu_unmap
+#_pmap_iommu_iovmfree
+#_pmap_iommu_ioctl
+#_pmap_iommu_grant_page
+#_pmap_iommu_alloc_contiguous_pages
+#_nvme_ppl_get_desc
+#_sart_get_desc
+#_t8020dart_get_desc
+#_t8020dart_vo_tte
+#_uat_get_desc
 _set_invalidate_hmac_function
 _PE_panic_debugging_enabled
 _register_additional_panic_data_buffer
@@ -84,20 +94,23 @@ _apply_func_phys
 _Switch_context
 _gT1Sz
 
-__ZN26IOUnifiedAddressTranslator10gMetaClassE
-__ZN26IOUnifiedAddressTranslator10superClassE
-__ZN26IOUnifiedAddressTranslator17getPageTableEntryEy
-__ZN26IOUnifiedAddressTranslator18setClientContextIDEjb
-__ZN26IOUnifiedAddressTranslator21removeClientContextIDEv
-__ZN26IOUnifiedAddressTranslator19isPageFaultExpectedEyj
-__ZN26IOUnifiedAddressTranslator22registerTaskForServiceEP4taskP9IOService
-__ZN26IOUnifiedAddressTranslator23createMappingInApertureEjP18IOMemoryDescriptorjym
-__ZN26IOUnifiedAddressTranslator23getTotalPageTableMemoryEv
-__ZN26IOUnifiedAddressTranslator3mapEP11IOMemoryMapj
-__ZN26IOUnifiedAddressTranslator5doMapEP18IOMemoryDescriptoryyj
-__ZN26IOUnifiedAddressTranslator5unmapEP11IOMemoryMap
-__ZN26IOUnifiedAddressTranslator7doUnmapEP18IOMemoryDescriptoryy
-__ZN26IOUnifiedAddressTranslator8taskDiedEv
-__ZN26IOUnifiedAddressTranslator12commitUnmapsEv
-__ZN26IOUnifiedAddressTranslator14prepareFWUnmapEyy
-__ZTV26IOUnifiedAddressTranslator
+# IOUnifiedAddressTranslator - same closed-source-gap class as the
+# pmap_iommu_*/DART block above (its C++ IOKit-side counterpart), no
+# implementation shipped in this public source drop.
+#__ZN26IOUnifiedAddressTranslator10gMetaClassE
+#__ZN26IOUnifiedAddressTranslator10superClassE
+#__ZN26IOUnifiedAddressTranslator17getPageTableEntryEy
+#__ZN26IOUnifiedAddressTranslator18setClientContextIDEjb
+#__ZN26IOUnifiedAddressTranslator21removeClientContextIDEv
+#__ZN26IOUnifiedAddressTranslator19isPageFaultExpectedEyj
+#__ZN26IOUnifiedAddressTranslator22registerTaskForServiceEP4taskP9IOService
+#__ZN26IOUnifiedAddressTranslator23createMappingInApertureEjP18IOMemoryDescriptorjym
+#__ZN26IOUnifiedAddressTranslator23getTotalPageTableMemoryEv
+#__ZN26IOUnifiedAddressTranslator3mapEP11IOMemoryMapj
+#__ZN26IOUnifiedAddressTranslator5doMapEP18IOMemoryDescriptoryyj
+#__ZN26IOUnifiedAddressTranslator5unmapEP11IOMemoryMap
+#__ZN26IOUnifiedAddressTranslator7doUnmapEP18IOMemoryDescriptoryy
+#__ZN26IOUnifiedAddressTranslator8taskDiedEv
+#__ZN26IOUnifiedAddressTranslator12commitUnmapsEv
+#__ZN26IOUnifiedAddressTranslator14prepareFWUnmapEyy
+#__ZTV26IOUnifiedAddressTranslator

@@ -37,6 +37,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <libkern/OSAtomic.h>                 // (OSCompareAndSwapPtr, backlog item 12)
 #include <IOKit/IOMessage.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/storage/IOBlockStorageDevice.h>
@@ -301,20 +302,53 @@ public:
 // probe(), which only happens once genuine IOKit matching begins, well after
 // BSD's own bootstrap) via a lazily-allocated singleton. The macro below
 // keeps every existing `gIOMediaBSDClientGlobals.foo()` call site in this
-// file working unchanged. Not thread-safe against concurrent first-use from
-// multiple threads (a real double-checked-locking gap) - acceptable here
-// since the first real call is expected to happen serially during initial
-// IOKit matching, matching this project's existing risk tolerance for
-// similar early-boot simplifications elsewhere.
+// file working unchanged.
+//
+// BACKLOG ITEM 12 FIX (2026-08-13): this used to be a bare
+// `if (ptr == NULL) ptr = new ...` with no synchronization, rationalized
+// as "the first real call is expected to happen serially during initial
+// IOKit matching" - no longer true since IOFDiskPartitionScheme now
+// produces 3 near-simultaneous IOMedia nubs (whole disk + 2 partitions),
+// each spawning an IOMediaBSDClient::init() on a potentially different
+// _IOConfigThread. Two threads racing the old check-then-assign could each
+// construct a real IOMediaBSDClientGlobals (each doing real bdevsw_add()/
+// cdevsw_add() work with side effects), with the second assignment
+// silently overwriting the first - orphaning whichever instance's device
+// nodes/major number lost the race, exactly the failure mode that would
+// look like "root device sometimes not found."
+//
+// Fixed with a lock-free CAS singleton (OSCompareAndSwapPtr, a standard
+// libkern primitive - no IOLock needed, sidestepping the original
+// too-early-for-real-locking-infrastructure concern this whole function
+// exists to work around). Both racing threads may still each construct a
+// full IOMediaBSDClientGlobals before the race is decided (this class's
+// constructor has no way to be "tentative"), but only one CAS wins and
+// only its bdevsw_add()/cdevsw_add() registrations remain reachable via
+// this accessor from then on - deterministic, not "whichever thread's
+// plain pointer write happened to land last."  A losing thread's already-
+// registered major/device-switch-table entry is not explicitly torn down
+// (this class has no public teardown API to call), a bounded resource
+// leak of at most one spare major number in the rare case this race is
+// actually hit - a real but minor cost, strictly better than the
+// silent-data-loss failure mode it replaces.
 static IOMediaBSDClientGlobals *gIOMediaBSDClientGlobalsPtr = NULL;
 
 static IOMediaBSDClientGlobals &
 IOMediaBSDClientGlobals_getInstance()
 {
-    if (gIOMediaBSDClientGlobalsPtr == NULL) {
-        gIOMediaBSDClientGlobalsPtr = new IOMediaBSDClientGlobals();
+    IOMediaBSDClientGlobals *p = gIOMediaBSDClientGlobalsPtr;
+    if (p == NULL) {
+        IOMediaBSDClientGlobals *candidate = new IOMediaBSDClientGlobals();
+        if (!OSCompareAndSwapPtr(NULL, candidate, (void * volatile *)&gIOMediaBSDClientGlobalsPtr)) {
+            // Lost the race - another thread's candidate is already
+            // published. Discard ours (see comment above: its
+            // bdevsw_add()/cdevsw_add() side effects are not unwound,
+            // a bounded leak, not a correctness issue).
+            delete candidate;
+        }
+        p = gIOMediaBSDClientGlobalsPtr;
     }
-    return *gIOMediaBSDClientGlobalsPtr;
+    return *p;
 }
 
 #define gIOMediaBSDClientGlobals (IOMediaBSDClientGlobals_getInstance())

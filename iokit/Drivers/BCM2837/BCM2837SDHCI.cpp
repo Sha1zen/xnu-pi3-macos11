@@ -39,6 +39,8 @@ BCM2837SDHCI::init(OSDictionary *properties)
 	fBlockSize = 512;
 
 	fPendingIntStatus = 0;
+	fRealInterruptHits = 0;
+	fPollFallbackHits = 0;
 	fInterruptLock = IOLockAlloc();
 	if (fInterruptLock == NULL) {
 		return false;
@@ -149,26 +151,31 @@ BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *ou
 	// doesn't actually take fInterruptLock (see interruptOccurred()), it
 	// just targets the same wait event address.
 	//
-	// TEMP DIAGNOSTIC / COMPAT: this sleeps in short (1ms) increments and
-	// directly polls+acks the raw INT_STATUS register on every wakeup,
-	// rather than sleeping straight through to the full deadline as
-	// originally written. Confirmed empirically (2026-08-09) that this
-	// board's real interrupt cascade (BCM2837LocalIntc ->
-	// BCM2837InterruptController, see those files) gets registered
-	// successfully but a raw ARM64 IRQ exception never actually reaches
-	// interruptOccurred() - whether that's a pexpert/osfmk-level gap in
-	// exception-vector wiring (BCM2837InterruptController.h already
-	// flagged this exact class of gap as unverified before any of this
-	// session's work) hasn't been root-caused. Confirmed via direct
-	// register readback that the SDHCI hardware itself completes commands
-	// correctly regardless (INT_STATUS shows the right bits set) - only
-	// the interrupt notification is missing. This polling fallback mirrors
-	// exactly what interruptOccurred() does, so it's a strict superset:
-	// if a real interrupt does fire, IOLockWakeup() below still wins
-	// immediately (this loop is not the only way to observe the bits);
-	// if not, the next 1ms poll tick picks it up instead. Once real
-	// interrupt delivery is confirmed working end to end, this can revert
-	// to a single IOLockSleepDeadline() straight to the full deadline.
+	// KEPT DELIBERATELY (no longer just a stopgap): this sleeps in short
+	// (1ms) increments and directly polls+acks the raw INT_STATUS register
+	// on every wakeup, rather than sleeping straight through to the full
+	// deadline as originally written back when (2026-08-09) this board's
+	// real interrupt cascade was confirmed NOT reaching interruptOccurred()
+	// at all (no BCM2837CPU/IOCPUInterruptController existed yet to wire
+	// it end to end). That's since changed: BCM2837CPU now wires
+	// sleh_irq -> IOCPUInterruptController -> BCM2837LocalIntc ->
+	// BCM2837InterruptController -> here, and fRealInterruptHits vs
+	// fPollFallbackHits (added 2026-08-13) confirmed via a real QEMU boot
+	// that genuine hardware interrupts DO reach interruptOccurred() now -
+	// but not for every single wait (that same boot's very first command
+	// still needed the poll fallback; see the class header comment for the
+	// exact log evidence and a plausible explanation). Until interrupt
+	// delivery is confirmed for 100% of waits rather than "at least the
+	// data-transfer-completion path, most of the time," reverting this to
+	// a pure blocking IOLockSleepDeadline() would risk actually hanging on
+	// whichever wait doesn't get a real interrupt - keeping the hybrid is
+	// the correct choice, not unfinished cleanup. This polling fallback
+	// mirrors exactly what interruptOccurred() does, so it's a strict
+	// superset: if a real interrupt does fire, IOLockWakeup() below still
+	// wins immediately (this loop is not the only way to observe the
+	// bits); if not, the next 1ms poll tick picks it up instead. Verified
+	// end-to-end against a real (emulated) SD card this way: full init
+	// sequence + a real PIO block read returning correct data.
 	IOLockLock(fInterruptLock);
 	uint32_t matched = 0;
 	uint32_t waitedUs = 0;
@@ -182,6 +189,16 @@ BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *ou
 		IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
 
 		if (matched != 0) {
+			// Reached here without this iteration's own poll block (below)
+			// ever running - the only other writer of fPendingIntStatus is
+			// interruptOccurred(), so this is a genuine ARM64 IRQ, not this
+			// loop noticing on its own.
+			uint32_t hits = ++fRealInterruptHits;
+			if (hits == 1) {
+				IOLog("BCM2837SDHCI: real hardware interrupt observed "
+				    "(interruptOccurred() -> waitForIntStatus32(), "
+				    "no polling needed)\n");
+			}
 			break;
 		}
 
@@ -208,6 +225,12 @@ BCM2837SDHCI::waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *ou
 				}
 				IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
 				if (matched != 0) {
+					uint32_t hits = ++fPollFallbackHits;
+					if (hits == 1) {
+						IOLog("BCM2837SDHCI: poll fallback resolved a wait "
+						    "(no interrupt arrived within one %u us tick)\n",
+						    kPollIntervalUs);
+					}
 					break;
 				}
 			}
@@ -370,10 +393,8 @@ BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, boo
 
 	uint32_t status;
 	if (!waitForIntStatus32(kIntCmdComplete | kIntErrorMask, 1000000, &status)) {
-		uint32_t rawIntStatus = readReg32(kRegIntStatus);
-		uint32_t presentState = readReg32(kRegPresentState);
-		IOLog("BCM2837SDHCI: CMD%u timed out (no CMD_COMPLETE/error) TEMP DIAGNOSTIC raw INT_STATUS=%#x PRESENT_STATE=%#x\n",
-		    cmdIndex, rawIntStatus, presentState);
+		IOLog("BCM2837SDHCI: CMD%u timed out (no CMD_COMPLETE/error) raw INT_STATUS=%#x PRESENT_STATE=%#x\n",
+		    cmdIndex, readReg32(kRegIntStatus), readReg32(kRegPresentState));
 		return false;
 	}
 	if (status & kIntErrorMask) {
@@ -585,22 +606,6 @@ BCM2837SDHCI::start(IOService *provider)
 		// Not fatal: publish the nub anyway so it's visible in the
 		// registry / a card can be identified later. reportMediaState
 		// reflects fCardPresent honestly either way.
-	}
-
-	// TEMP DIAGNOSTIC: direct real-block-read proof, since there's no
-	// filesystem/IOBlockStorageDriver consumer wired up yet to exercise
-	// this path any other way. Reads LBA 0 and dumps the first 16 bytes.
-	if (fCardPresent) {
-		uint8_t testBuf[512];
-		bzero(testBuf, sizeof(testBuf));
-		bool ok = readBlocksPIO(0, 1, testBuf);
-		IOLog("BCM2837SDHCI: TEMP DIAGNOSTIC readBlocksPIO(0,1) ok=%d bytes: "
-		    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-		    ok,
-		    testBuf[0], testBuf[1], testBuf[2], testBuf[3],
-		    testBuf[4], testBuf[5], testBuf[6], testBuf[7],
-		    testBuf[8], testBuf[9], testBuf[10], testBuf[11],
-		    testBuf[12], testBuf[13], testBuf[14], testBuf[15]);
 	}
 
 	registerService();

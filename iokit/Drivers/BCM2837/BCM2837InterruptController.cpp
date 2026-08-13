@@ -75,17 +75,6 @@ BCM2837InterruptController::start(IOService *provider)
 		return false;
 	}
 
-	{
-		IOItemCount memCount = provider->getDeviceMemoryCount();
-		IODeviceMemory *dm = (memCount > 0) ? provider->getDeviceMemoryWithIndex(0) : NULL;
-		IOLog("TEMP DIAGNOSTIC: intc provider getDeviceMemoryCount=%u dm=%p\n",
-		    memCount, (void *)dm);
-		if (dm != NULL) {
-			IOLog("TEMP DIAGNOSTIC: intc dm phys=%#llx len=%#llx\n",
-			    (unsigned long long)dm->getPhysicalAddress(), (unsigned long long)dm->getLength());
-		}
-	}
-
 	fRegMap = provider->mapDeviceMemoryWithIndex(0);
 	if (fRegMap == NULL) {
 		IOLog("BCM2837InterruptController: failed to map \"intc\" registers\n");
@@ -190,8 +179,23 @@ BCM2837InterruptController::dispatchBank(uint32_t pending, IOInterruptVectorNumb
 		vector->interruptActive = 1;
 		OSMemoryBarrier();
 
-		if (!vector->interruptDisabledSoft && vector->interruptRegistered) {
-			vector->handler(vector->target, vector->refCon, vector->nub, vector->source);
+		if (!vector->interruptDisabledSoft) {
+			if (vector->interruptRegistered) {
+				vector->handler(vector->target, vector->refCon, vector->nub, vector->source);
+			}
+		} else {
+			// Lazy hard-disable, matching Apple's own reference pattern
+			// (iokit/Examples/drvGenericInterruptController/
+			// GenericInterruptController.cpp's handleInterrupt()) - found
+			// missing via adversarial review 2026-08-13. Without this, a
+			// client that soft-disables a still-asserted level source (see
+			// getVectorType() - these are all level-triggered) never gets
+			// its handler called again to clear the condition at the
+			// device, the pending bit never actually clears in hardware,
+			// and the CPU IRQ line stays asserted - sleh_irq() would
+			// re-enter immediately on return, a real livelock.
+			vector->interruptDisabledHard = 1;
+			disableVectorHard(vectorNumber, vector);
 		}
 
 		vector->interruptActive = 0;

@@ -75,9 +75,10 @@ public:
 	virtual bool init(OSDictionary *propTable) APPLE_KEXT_OVERRIDE;
 
 	// Defensive re-check that provider is actually named "intc" - see
-	// BCM2837ArmIO.h for why this is needed (IOService::matchInternal()'s
-	// generic IONameMatch handling was empirically observed matching this
-	// personality against sibling nodes too, not just "intc").
+	// iokit/Drivers/BCM2837/BCM2837ArmIO.h (xnu-7195 tree) for why this is
+	// needed (IOService::matchInternal()'s generic IONameMatch handling
+	// was empirically observed matching this personality against sibling
+	// nodes too, not just "intc").
 	virtual IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
 
 	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;

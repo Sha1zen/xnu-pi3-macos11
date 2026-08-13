@@ -325,12 +325,27 @@ public:
 // constructor has no way to be "tentative"), but only one CAS wins and
 // only its bdevsw_add()/cdevsw_add() registrations remain reachable via
 // this accessor from then on - deterministic, not "whichever thread's
-// plain pointer write happened to land last."  A losing thread's already-
-// registered major/device-switch-table entry is not explicitly torn down
-// (this class has no public teardown API to call), a bounded resource
-// leak of at most one spare major number in the rare case this race is
-// actually hit - a real but minor cost, strictly better than the
-// silent-data-loss failure mode it replaces.
+// plain pointer write happened to land last."
+//
+// CORRECTED 2026-08-13 (adversarial review): an earlier version of this
+// comment claimed the losing thread's `delete candidate` below leaves its
+// bdevsw_add()/cdevsw_add() registrations as "a bounded leak, not a
+// correctness issue." That was wrong, not just imprecise - `delete`
+// really does run `~IOMediaBSDClientGlobals()`, which really does call
+// `devsw_remove()` for both switch tables, and `bdevsw_remove()`/
+// `cdevsw_remove()` content-compare their slot before clearing it
+// (bsd/kern/bsd_stubs.c), so a loser can't ever clobber the winner's
+// entry either. There is no leak here at all - correcting the record so a
+// future reader doesn't go looking for one, or "fix" this by adding
+// teardown logic that already exists.
+//
+// One real, minor gap the review did find: the `p = gIOMediaBSDClientGlobalsPtr`
+// fast-path read below is a plain load with only an address dependency
+// ordering it against the publishing thread's CAS (which has release
+// semantics) - the textbook double-checked-locking hole. Correct in
+// practice on arm64 (a real dependent load), but not guaranteed by the
+// language; left as a known-low-severity gap rather than reached for
+// std::atomic in this otherwise plain-C++ file.
 static IOMediaBSDClientGlobals *gIOMediaBSDClientGlobalsPtr = NULL;
 
 static IOMediaBSDClientGlobals &
@@ -341,9 +356,10 @@ IOMediaBSDClientGlobals_getInstance()
         IOMediaBSDClientGlobals *candidate = new IOMediaBSDClientGlobals();
         if (!OSCompareAndSwapPtr(NULL, candidate, (void * volatile *)&gIOMediaBSDClientGlobalsPtr)) {
             // Lost the race - another thread's candidate is already
-            // published. Discard ours (see comment above: its
-            // bdevsw_add()/cdevsw_add() side effects are not unwound,
-            // a bounded leak, not a correctness issue).
+            // published. Discard ours: ~IOMediaBSDClientGlobals() really
+            // does unwind its bdevsw_add()/cdevsw_add() registrations (see
+            // corrected comment above) - this is real cleanup, not a
+            // leak.
             delete candidate;
         }
         p = gIOMediaBSDClientGlobalsPtr;

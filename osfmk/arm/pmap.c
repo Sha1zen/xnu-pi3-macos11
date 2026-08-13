@@ -5026,57 +5026,71 @@ pmap_virtual_region(
 		low_global_vr_size = 0x800000;
 	}
 
-	if (((gVirtBase & low_global_vr_mask) != LOW_GLOBAL_BASE_ADDRESS) && (region_select == 2)) {
-		*startp = LOW_GLOBAL_BASE_ADDRESS;
-		*size = low_global_vr_size;
-		ret = TRUE;
-	}
-
 	/* TEMP DIAGNOSTIC / COMPAT FIX: this board's loader gives phys_base ==
 	 * mem_base (see project memory), which makes this kernel's fixed
 	 * __TEXT link address collide exactly with LOW_GLOBAL_BASE_ADDRESS -
 	 * i.e. (gVirtBase & low_global_vr_mask) == LOW_GLOBAL_BASE_ADDRESS
-	 * always on this board, so the low-global block above never fires
-	 * for any region_select (its own guard condition is permanently
-	 * false here) - which is correct, since attempting that fixed 8MB
-	 * reservation for real actually fails downstream with KERN_NO_SPACE
-	 * (confirmed via a live diag latch in kmem_init: region_select=2,
-	 * kr=3), because that VA range genuinely overlaps the kernel's own
-	 * already-mapped image on this collided layout. But the *original*
-	 * upstream code only ever reserves the heap range
+	 * always on this board. Upstream's original shape reserves low-global
+	 * under region_select==2, then the heap range
 	 * [VM_MIN_KERNEL_ADDRESS, LOW_GLOBAL_BASE_ADDRESS) under
-	 * region_select==3, one iteration *after* the (here, permanently
-	 * skipped) low-global block - so kmem_init()'s region-probing loop,
-	 * which stops at the first pmap_virtual_region() call that returns
-	 * FALSE, terminates at region_select==2 without ever reaching this
-	 * block, silently dropping the heap-range reservation. That missing
-	 * reservation is what shifts the zone restricted-VA submap onto/
-	 * below KERNEL_PMAP_HEAP_RANGE_START, tripping
-	 * vm_packing_verify_range()'s "min <= base" panic downstream in
-	 * zone_submap_init(). Fix: relabel this block from region_select==3
-	 * to region_select==2, so the loop's very next (and, on this board,
-	 * last-successful) iteration does the heap-range reservation instead
-	 * of the doomed low-global one. Real region_select==3 then correctly
-	 * finds nothing left to reserve and the loop terminates cleanly. The
-	 * known-good precompiled reference kernel for this exact xnu-7195
-	 * vintage needed the functionally-identical fix as a raw binary
-	 * patch (a single `cmp w0,#3`->`cmp w0,#2` instruction edit in this
-	 * exact function) - this is that same fix as a real source change.
-	 * Wrong on real hardware/genuine KASLR (where gVirtBase can't
-	 * collide with LOW_GLOBAL_BASE_ADDRESS this way and the low-global
-	 * block above does fire normally), safe only because this loader+
-	 * board combo deterministically produces the collision. See project
-	 * memory (Bug #5 / pmap_virtual_region fix history). Uses else-if so the
- * two region_select==2 checks stay mutually exclusive - on real hardware
- * (gate above true) region_select==2 still does only the low-global
- * reservation, unchanged from upstream. */
-	else if (region_select == 2) {
-		/* In this config, we allow the bootstrap mappings to occupy the same
-		 * page table pages as the heap.
-		 */
-		*startp = VM_MIN_KERNEL_ADDRESS;
-		*size = LOW_GLOBAL_BASE_ADDRESS - *startp;
-		ret = TRUE;
+	 * region_select==3, one iteration later - but attempting the low-global
+	 * reservation for real on this collided layout fails downstream with
+	 * KERN_NO_SPACE (confirmed via a live diag latch in kmem_init:
+	 * region_select=2, kr=3), because that VA range genuinely overlaps the
+	 * kernel's own already-mapped image here.
+	 *
+	 * REGRESSION FOUND AND FIXED 2026-08-13 (adversarial review): an
+	 * earlier version of this fix collapsed both region_select==2 and
+	 * region_select==3 into a single `else if (region_select == 2)`
+	 * branch that ran only when the collision-detect `if` above had
+	 * already failed - which deleted the real region_select==3 case
+	 * entirely, for BOTH the collision and non-collision paths. On this
+	 * board (collision always true) that was harmless, since the
+	 * else-if's unconditional `region_select == 2` check still fired and
+	 * did the heap reservation one iteration earlier than upstream,
+	 * region_select==3 correctly found nothing left. But on real
+	 * hardware/genuine KASLR (collision false), region_select==2 takes
+	 * the low-global branch instead, and a *separate* real
+	 * region_select==3 case is required to do the heap reservation - the
+	 * collapsed version had no such case, silently skipping it and
+	 * reproducing the exact zone_submap_init()/vm_packing_verify_range()
+	 * "min <= base" panic this whole fix exists to prevent, just on real
+	 * hardware instead of this board's collided layout, and never having
+	 * been exercised because real hardware has never been booted this
+	 * far yet. Fixed by nesting on the collision predicate explicitly
+	 * instead of relabeling one region_select value as another: each of
+	 * the two mutually-exclusive paths below reserves low-global once and
+	 * the heap range once, on whichever region_select happens to be free
+	 * to carry it in that path - identical to today's behavior in the
+	 * collision case (verified: same two (start,size) pairs, same
+	 * region_select values), and now also correct in the non-collision
+	 * case. See project memory (Bug #5 / pmap_virtual_region fix
+	 * history) for the original bug this replaces. */
+	if ((gVirtBase & low_global_vr_mask) != LOW_GLOBAL_BASE_ADDRESS) {
+		/* Real hardware / genuine KASLR shape, matches upstream exactly. */
+		if (region_select == 2) {
+			*startp = LOW_GLOBAL_BASE_ADDRESS;
+			*size = low_global_vr_size;
+			ret = TRUE;
+		} else if (region_select == 3) {
+			/* In this config, we allow the bootstrap mappings to occupy the
+			 * same page table pages as the heap.
+			 */
+			*startp = VM_MIN_KERNEL_ADDRESS;
+			*size = LOW_GLOBAL_BASE_ADDRESS - *startp;
+			ret = TRUE;
+		}
+	} else {
+		/* This board's collided loader layout: low-global is unreachable
+		 * (see above), so do the heap reservation on region_select==2
+		 * instead - real region_select==3 then correctly finds nothing
+		 * left and the loop terminates cleanly, unchanged from before this
+		 * fix. */
+		if (region_select == 2) {
+			*startp = VM_MIN_KERNEL_ADDRESS;
+			*size = LOW_GLOBAL_BASE_ADDRESS - *startp;
+			ret = TRUE;
+		}
 	}
 #endif
 #endif

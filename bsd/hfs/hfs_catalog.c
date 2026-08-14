@@ -1869,7 +1869,22 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 			dir->textEncoding = descp->cd_encoding;
 		}
 		dir->folderCount      = attrp->ca_dircount;
-		bcopy(&attrp->ca_finderinfo[0], &dir->userInfo, 32);
+		/* REAL BUG FOUND (2026-08-14, first real chown()/setattr() ever
+		 * exercised against this HFS+ catalog code in this project):
+		 * a single 32-byte bcopy() into &dir->userInfo panics under this
+		 * kernel's strict FORTIFY_SOURCE mode (BOS_COPY_TYPE=1, active
+		 * whenever XNU_KERNEL_PRIVATE is defined -- see
+		 * osfmk/libsa/string.h) with "__memmove_chk object size check
+		 * failed: ... (16 < 32)": __builtin_object_size(&dir->userInfo, 1)
+		 * correctly reports userInfo's own 16-byte sub-object size (a
+		 * FndrDirInfo), not the 32 bytes spanning into the adjacent
+		 * finderInfo field, even though userInfo+finderInfo are packed
+		 * contiguously in struct HFSPlusCatalogFolder (hfs_format.h) and
+		 * the combined copy is safe in practice. Split into two 16-byte
+		 * copies, matching the pattern the kHFSFolderRecord case above
+		 * already uses for the exact same userInfo/finderInfo pair. */
+		bcopy(&attrp->ca_finderinfo[0], &dir->userInfo, 16);
+		bcopy(&attrp->ca_finderinfo[16], &dir->finderInfo, 16);
 		/*
 		 * Update the BSD Info if it was already initialized on
 		 * disk or if the runtime values have been modified.
@@ -1936,7 +1951,11 @@ catrec_update(const CatalogKey *ckp, CatalogRecord *crp, struct update_state *st
 		} else {
 			file->textEncoding = descp->cd_encoding;
 		}
-		bcopy(&attrp->ca_finderinfo[0], &file->userInfo, 32);
+		/* Same strict-FORTIFY_SOURCE split as the kHFSPlusFolderRecord
+		 * case above (this file, ~line 1872) -- identical bug class,
+		 * file->userInfo/finderInfo instead of dir's. */
+		bcopy(&attrp->ca_finderinfo[0], &file->userInfo, 16);
+		bcopy(&attrp->ca_finderinfo[16], &file->finderInfo, 16);
 		/*
 		 * Update the BSD Info if it was already initialized on
 		 * disk or if the runtime values have been modified.
@@ -4203,7 +4222,12 @@ buildrecord(struct cat_attr *attrp, cnid_t cnid, int std_hfs, u_int32_t encoding
 			crp->hfsPlusFolder.backupDate = 0;
 			crp->hfsPlusFolder.textEncoding = encoding;
 			crp->hfsPlusFolder.folderCount = 0;
-			bcopy(attrp->ca_finderinfo, &crp->hfsPlusFolder.userInfo, 32);
+			/* Same strict-FORTIFY_SOURCE split as catrec_update()'s
+			 * identical bcopy() above (this file) -- new-record path,
+			 * same bug class, never exercised before (no writable HFS+
+			 * root existed until now). */
+			bcopy(attrp->ca_finderinfo, &crp->hfsPlusFolder.userInfo, 16);
+			bcopy(attrp->ca_finderinfo + 16, &crp->hfsPlusFolder.finderInfo, 16);
 			bsdp = &crp->hfsPlusFolder.bsdInfo;
 			bsdp->special.linkCount = 1;
 			*recordSize = sizeof(HFSPlusCatalogFolder);
@@ -4219,7 +4243,9 @@ buildrecord(struct cat_attr *attrp, cnid_t cnid, int std_hfs, u_int32_t encoding
 			crp->hfsPlusFile.backupDate = 0;
 			crp->hfsPlusFile.textEncoding = encoding;
 			crp->hfsPlusFile.reserved2 = 0;
-			bcopy(attrp->ca_finderinfo, &crp->hfsPlusFile.userInfo, 32);
+			/* Same strict-FORTIFY_SOURCE split as above. */
+			bcopy(attrp->ca_finderinfo, &crp->hfsPlusFile.userInfo, 16);
+			bcopy(attrp->ca_finderinfo + 16, &crp->hfsPlusFile.finderInfo, 16);
 			bsdp = &crp->hfsPlusFile.bsdInfo;
 			/* BLK/CHR need to save the device info */
 			if (type == S_IFBLK || type == S_IFCHR) {

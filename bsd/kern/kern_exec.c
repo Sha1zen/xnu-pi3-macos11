@@ -1827,8 +1827,10 @@ again:
 		*imgp->ip_origvattr = *imgp->ip_vattr;
 	}
 
+#if DEBUG
 	printf("TEMP DIAGNOSTIC: exec_activate_image about to vn_rdwr, ip_vp=%p vtype=%d excpath=%s\n",
 	    (void *)imgp->ip_vp, imgp->ip_vp ? vnode_vtype(imgp->ip_vp) : -1, excpath);
+#endif /* DEBUG */
 
 	error = vn_rdwr(UIO_READ, imgp->ip_vp, imgp->ip_vdata, PAGE_SIZE, 0,
 	    UIO_SYSSPACE, IO_NODELOCKED,
@@ -1842,6 +1844,7 @@ again:
 		memset(imgp->ip_vdata + (PAGE_SIZE - resid), 0x0, resid);
 	}
 
+#if DEBUG
 	printf("TEMP DIAGNOSTIC: exec_activate_image read %d bytes (resid=%d), first 16: "
 	    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	    (int)(PAGE_SIZE - resid), resid,
@@ -1853,6 +1856,7 @@ again:
 	    (unsigned char)imgp->ip_vdata[10], (unsigned char)imgp->ip_vdata[11],
 	    (unsigned char)imgp->ip_vdata[12], (unsigned char)imgp->ip_vdata[13],
 	    (unsigned char)imgp->ip_vdata[14], (unsigned char)imgp->ip_vdata[15]);
+#endif /* DEBUG */
 
 encapsulated_binary:
 	/* Limit the number of iterations we will attempt on each binary */
@@ -6400,14 +6404,18 @@ load_init_program(proc_t p)
 	mach_vm_offset_t scratch_addr = 0;
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
+#if DEBUG
 	printf("TEMP DIAGNOSTIC: load_init_program p=%p task=%p thread=%p map=%p kernel_map=%p\n",
 	    (void *)p, (void *)current_task(), (void *)current_thread(), (void *)map,
 	    (void *)kernel_map);
+#endif /* DEBUG */
 
 	{
 		kern_return_t scratch_kr = mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+#if DEBUG
 		printf("TEMP DIAGNOSTIC: mach_vm_allocate_kernel kr=%d scratch_addr=%#llx map=%p map_page_size=%#llx\n",
 		    scratch_kr, (unsigned long long)scratch_addr, (void *)map, (unsigned long long)map_page_size);
+#endif /* DEBUG */
 	}
 #if CONFIG_MEMORYSTATUS
 	(void) memorystatus_init_at_boot_snapshot();

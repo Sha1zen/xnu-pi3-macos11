@@ -783,14 +783,14 @@ int msdosfs_vnop_read(struct vnop_read_args *ap)
 
 	KERNEL_DEBUG_CONSTANT(MSDOSFS_VNOP_READ|DBG_FUNC_START, dep, uio_offset(uio), uio_resid(uio), dep->de_FileSize, 0);
 
-	printf("TEMP DIAGNOSTIC: msdosfs_vnop_read vp=%p isreg=%d de_StartCluster=%u de_FileSize=%u "
+	if (DEBUG) printf("TEMP DIAGNOSTIC: msdosfs_vnop_read vp=%p isreg=%d de_StartCluster=%u de_FileSize=%u "
 	    "offset=%lld resid=%lld\n",
 	    (void *)vp, vnode_isreg(vp), dep->de_StartCluster, dep->de_FileSize,
 	    (long long)uio_offset(uio), (long long)uio_resid(uio));
 
 	if (vnode_isreg(vp)) {
 		error = cluster_read(vp, uio, (off_t)dep->de_FileSize, ap->a_ioflag);
-		printf("TEMP DIAGNOSTIC: msdosfs_vnop_read cluster_read returned %d, resid now %lld\n",
+		if (DEBUG) printf("TEMP DIAGNOSTIC: msdosfs_vnop_read cluster_read returned %d, resid now %lld\n",
 		    error, (long long)uio_resid(uio));
 		if (error == 0 && (vfs_flags(pmp->pm_mountp) & (MNT_RDONLY | MNT_NOATIME)) == 0)
 			dep->de_flag |= DE_ACCESS;
@@ -2426,7 +2426,7 @@ int msdosfs_vnop_blockmap(struct vnop_blockmap_args *ap)
     /* Find the physical (device) block where that cluster starts */
     error = msdosfs_pcbmap(dep, cn, numclusters, &bn, NULL, &runsize);
 
-    printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap de_StartCluster=%u foffset=%lld cn=%u "
+    if (DEBUG) printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap de_StartCluster=%u foffset=%lld cn=%u "
         "pcbmap_error=%d bn(pre-adjust)=%lld runsize=%u\n",
         dep->de_StartCluster, (long long)ap->a_foffset, cn, error, (long long)bn, runsize);
 
@@ -2434,7 +2434,7 @@ int msdosfs_vnop_blockmap(struct vnop_blockmap_args *ap)
     bn += (((uint32_t)ap->a_foffset - de_cn2off(pmp, cn)) >> pmp->pm_bnshift);
     runsize -= ((uint32_t)ap->a_foffset - (de_cn2off(pmp, cn)));
 
-    printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap bn(final)=%lld\n", (long long)bn);
+    if (DEBUG) printf("TEMP DIAGNOSTIC: msdosfs_vnop_blockmap bn(final)=%lld\n", (long long)bn);
 
     *ap->a_bpn = bn;
 	if (error == 0 && ap->a_run) {

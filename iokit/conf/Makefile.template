@@ -17,7 +17,73 @@ include $(MakeInc_def)
 # XXX: CFLAGS
 #
 CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE		\
-	-DIOKIT_KERNEL_PRIVATE -DDRIVERKIT_PRIVATE=1 -DIOMATCHDEBUG=1 -DIOALLOCDEBUG=1
+	-DIOKIT_KERNEL_PRIVATE -DDRIVERKIT_PRIVATE=1 -DIOMATCHDEBUG=1 -DIOALLOCDEBUG=1 \
+	-D__PRIVATE_SPI__ -I$(SRCROOT)/iokit/Network -I$(SRCROOT)/bsd -I$(SRCROOT)/osfmk
+# __PRIVATE_SPI__ is IONetworkingFamily's own build flag: its real
+# IONetworkingFamily.xcodeproj sets GCC_PREPROCESSOR_DEFINITIONS =
+# __PRIVATE_SPI__ for every one of its targets (confirmed in the pinned
+# apple-oss-distributions checkout, not guessed). IONetworkController.h
+# gates outputStart/pollInputPackets/setInputPacketPollingEnable/
+# IOMbufServiceClass behind it while the corresponding .cpp defines them
+# unconditionally, so the base class itself fails to compile without this.
+# Kernel-wide rather than scoped to iokit/Network/ because this Makefile
+# has no per-directory CFLAGS mechanism (checked: no precedent anywhere in
+# xnu's conf/ Makefiles) and the flag is additive - it only exposes extra
+# declarations behind #ifdef, so it is inert for every other iokit source.
+#
+# -Iiokit/Network is needed for a different reason: IONetworkingFamily's
+# own .cpp files reach their sibling private headers (IONetworkDebug.h,
+# IONetworkControllerPrivate.h, IONetworkTypesPrivate.h, IOMbufQueue.h,
+# IONetworkStack.h, IONetworkUserClient.h) two different ways - some via
+# quoted "Foo.h" includes (which find a same-directory sibling on their
+# own, no flag needed) but others via bare unprefixed <Foo.h> - e.g.
+# IOEthernetInterface.cpp's `#include <IOEthernetInterface.h>` - which do
+# not search the including file's own directory and need an explicit -I.
+# In Apple's real Xcode build this resolves because the kext project's
+# own directory is on its header search path; iokit/Network/ (where both
+# the .cpp files AND all of the family's .h files - public and private
+# alike - are vendored, one flat directory, matching the upstream kext's
+# own layout) is this project's equivalent of that.
+#
+# -I$(SRCROOT)/bsd and -I$(SRCROOT)/osfmk are needed for a third reason,
+# discovered by reading bsd/net/dlil.h rather than guessed: it is a real,
+# public, EXPORT_HDRS-exported header, but under `#ifdef KERNEL_PRIVATE`
+# (which this whole kernel build defines globally, so this is always
+# live) it unconditionally #includes several headers - net/classq/classq.h,
+# net/flowadv.h so far, and likely more - that their OWN component
+# Makefiles mark INSTALL_KF_MI_LCL-only. That install class lands in a
+# separately-built SDK's PrivateHeaders tree (DSTROOT-based), never in the
+# live in-tree EXPORT_HDRS our iokit sources' normal -I path searches
+# (confirmed: their EXPORT_MI_LIST, the list that actually populates
+# EXPORT_HDRS, is empty). Real Apple builds never hit this because
+# IONetworkingFamily is genuinely always a separate kext project compiled
+# against that already-built SDK, never inside the xnu Makefile itself;
+# this project has no equivalent multi-pass SDK bootstrap; it compiles
+# IONetworkingFamily's sources directly into the kernel instead (no kext
+# cache pipeline exists here - see CLAUDE.md). bsd's and osfmk's own
+# in-component code never hits this either, because it already resolves
+# these same headers by real relative path against the live source tree,
+# which is exactly what these two -I flags now give iokit as well, rather
+# than chasing down and separately vendoring each individual private
+# header dlil.h happens to reach into as it is discovered one at a time.
+#
+# A fourth gap, TargetConditionals.h (IONetworkInterface.cpp includes it
+# plainly - just TARGET_OS_*/TARGET_CPU_* macros, no dependencies of its
+# own), is deliberately NOT fixed by adding -I$(SDKROOT_RESOLVED)/usr/include
+# here. That was tried first and reverted: it silently broke an unrelated
+# file, DriverKit/OSObject.iig.cpp, which stopped compiling with parse
+# errors inside libkern/c++/OSString.h. Root cause, confirmed by a clean
+# baseline rebuild with this flag removed: the SDK's own
+# usr/include/os/base.h shadows libkern/os/base.h (the real one, which
+# defines OS_PTRAUTH_SIGNED_PTR) at the identical relative path
+# "os/base.h" - broadly adding the whole SDK include tree resolves
+# TargetConditionals.h but silently substitutes the wrong file for
+# anything else colliding on a relative path, which is exactly the kind
+# of shadowing bug that stays invisible until something downstream fails
+# to parse. TargetConditionals.h itself is instead vendored directly as
+# an ordinary file into iokit/Network/ (real, unmodified, from the pinned
+# iPhoneOS SDK - not custom code), which is safe because nothing else in
+# this tree has a file at that exact relative path (checked).
 SFLAGS+= -include meta_features.h
 #-DIOKITDEBUG=-1
 

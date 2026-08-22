@@ -45,6 +45,19 @@ iokit/Storage/IOMediaBSDClient.cpp			optional iokitcpp
 iokit/Storage/IOPartitionScheme.cpp			optional iokitcpp
 iokit/Storage/IOFDiskPartitionScheme.cpp		optional iokitcpp
 
+iokit/Network/IONetworkController.cpp			optional iokitcpp
+iokit/Network/IONetworkInterface.cpp			optional iokitcpp
+iokit/Network/IOEthernetController.cpp			optional iokitcpp
+iokit/Network/IOEthernetInterface.cpp			optional iokitcpp
+iokit/Network/IONetworkMedium.cpp			optional iokitcpp
+iokit/Network/IONetworkData.cpp			optional iokitcpp
+iokit/Network/IOMbufMemoryCursor.cpp			optional iokitcpp
+iokit/Network/IOOutputQueue.cpp			optional iokitcpp
+iokit/Network/IOPacketQueue.cpp			optional iokitcpp
+iokit/Network/IOKernelDebugger.cpp			optional iokitcpp
+iokit/Network/IONetworkStack.cpp			optional iokitcpp
+iokit/Network/IONetworkUserClient.cpp			optional iokitcpp
+
 iokit/Drivers/BCM2837/BCM2837InterruptController.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PlatformExpert.cpp	optional iokitcpp
@@ -55,6 +68,7 @@ iokit/Drivers/BCM2837/BCM2837Personalities.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837DWC2.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837USBEnum.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/SMSC9514USBTransport.cpp	optional iokitcpp
+iokit/Drivers/BCM2837/SMSC9514Ethernet.cpp		optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp
 

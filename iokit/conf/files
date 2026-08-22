@@ -54,6 +54,7 @@ iokit/Drivers/BCM2837/BCM2837CPU.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Personalities.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837DWC2.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837USBEnum.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/SMSC9514USBTransport.cpp	optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp
 

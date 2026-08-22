@@ -263,7 +263,12 @@ IONetworkNamePrefixMatching( const char * prefix )
 	return NULL;
 }
 
-static bool
+// No longer static: iokit/Drivers/BCM2837/BCM2837DWC2.cpp (this board's
+// real-hardware Ethernet bring-up, no configd/InterfaceNamer available in
+// this port) calls this directly to complete BSD/ifconfig registration for
+// SMSC9514Ethernet's interface, generalizing what was previously only
+// reachable from the netboot-root path below.
+bool
 IORegisterNetworkInterface( IOService * netif )
 {
 	// A network interface is typically named and registered

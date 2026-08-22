@@ -428,7 +428,29 @@ tcp_tfo_init(void)
 	u_char key[TCP_FASTOPEN_KEYLEN];
 
 	read_frandom(key, sizeof(key));
-	aes_encrypt_key128(key, &tfo_ctx);
+
+	/*
+	 * Phase 6b, 2026-08-21: the return value was ignored upstream because
+	 * on a normal system AES is always available (the corecrypto kext
+	 * registers it long before this runs). This kernel loads no kexts, so
+	 * g_crypto_funcs is NULL and aes_encrypt_key() now reports failure
+	 * instead of dereferencing it - see libkern/crypto/corecrypto_aes.c
+	 * for the full panic trace this replaced.
+	 *
+	 * TCP Fast Open cookies are AES-encrypted, so without AES there is no
+	 * way to produce or validate one. Turn TFO off rather than leaving
+	 * tfo_ctx uninitialized: an unchecked failure here would leave the
+	 * context full of stack garbage and TFO would then "work" by minting
+	 * cookies from it. TFO is a latency optimisation, not required for
+	 * any TCP connection to function.
+	 */
+	if (aes_encrypt_key128(key, &tfo_ctx) != aes_good) {
+		if (tcp_fastopen != 0) {
+			printf("tcp_tfo_init: AES unavailable "
+			    "(no corecrypto kext), disabling TCP Fast Open\n");
+			tcp_fastopen = 0;
+		}
+	}
 }
 
 /*

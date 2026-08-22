@@ -7406,24 +7406,29 @@ ifnet_attach(ifnet_t ifp, const struct sockaddr_dl *ll_addr)
 	 */
 #if INET
 	/*
-	 * TEMP DIAGNOSTIC / consistent with uipc_domain.c's domaininit():
-	 * this board has no network interface and INET/INET6 domain
-	 * registration is disabled there (see that file's comment) - so
-	 * igmp_init() (one of inetsw[]'s per-protocol pr_init callbacks)
-	 * never runs, and igi_alloc() here (bsd/netinet/igmp.c) allocates
-	 * from an uninitialized zone, crashing on the very first
-	 * ifnet_attach() call (loopback). Skip IGMP attach here for the
-	 * same reason - this is a direct, expected downstream consequence
-	 * of that decision, not a new/separate bug.
+	 * Phase 6b, 2026-08-21: RE-ENABLED. This block was previously wrapped
+	 * in `if (0)`, correctly, as a direct downstream consequence of INET
+	 * domain registration being disabled in uipc_domain.c's domaininit():
+	 * with no INET domain, igmp_init() (one of inetsw[]'s per-protocol
+	 * pr_init callbacks) never ran, so igi_alloc() below would allocate
+	 * from an uninitialized zone and crash on the very first
+	 * ifnet_attach() (loopback).
+	 *
+	 * That premise is now gone - INET is registered again, so igmp_init()
+	 * runs and the zone is live. Leaving this disabled with INET on is
+	 * actively worse than either consistent state: ifnet_attach() succeeds
+	 * but leaves every interface with a NULL IGMP_IFINFO, which trips
+	 * `assertion failed: inm->inm_igi != NULL` (bsd/netinet/in_mcast.c:629)
+	 * the moment anything touches IPv4 multicast - which the loopback
+	 * attach path itself does. That is the exact panic that re-enabling
+	 * INET produced before this was restored.
 	 */
-	if (0) {
 	if (IGMP_IFINFO(ifp) == NULL) {
 		IGMP_IFINFO(ifp) = igmp_domifattach(ifp, Z_WAITOK);
 		VERIFY(IGMP_IFINFO(ifp) != NULL);
 	} else {
 		VERIFY(IGMP_IFINFO(ifp)->igi_ifp == ifp);
 		igmp_domifreattach(IGMP_IFINFO(ifp));
-	}
 	}
 #endif /* INET */
 	/*

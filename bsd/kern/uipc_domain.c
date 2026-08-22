@@ -777,8 +777,19 @@ domaininit(void)
 	 * and systemdomain_s stay registered, they're needed for more than
 	 * networking. Revisit once real Ethernet exists.
 	 */
-#if 0
+	/*
+	 * Phase 6b, 2026-08-21: INET re-enabled. The scope decision above was
+	 * taken when no network interface could exist; Phase 6a's DWC2 driver
+	 * (iokit/BCM2837DWC2/) removes that premise, so the ip_init() crash
+	 * described above now has to be root-caused rather than routed around.
+	 *
+	 * INET6 stays off deliberately, and separately: it is a second, much
+	 * larger stack with its own bootstrap, nothing in the roadmap needs
+	 * IPv6, and enabling both at once would make any crash ambiguous about
+	 * which one caused it. One variable at a time.
+	 */
 	attach_domain(&inetdomain_s);
+#if 0
 	attach_domain(&inet6domain_s);
 #endif
 #if MULTIPATH

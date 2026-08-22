@@ -35,6 +35,39 @@
 aes_rval
 aes_encrypt_key(const unsigned char *key, int key_len, aes_encrypt_ctx cx[1])
 {
+	/*
+	 * COMPAT (2026-08-21, Phase 6b): g_crypto_funcs is populated by the
+	 * closed-source corecrypto kext's own initialization. This bare
+	 * from-source kernel loads no kexts at all, so it stays NULL and every
+	 * function in this file was an unconditional NULL dereference.
+	 *
+	 * Not theoretical: enabling the INET domain (bsd/kern/uipc_domain.c)
+	 * panicked immediately here, reached via
+	 *   bsd_init -> domaininit -> init_domain -> in_dinit
+	 *     -> net_init_proto -> tcp_init -> tcp_tfo_init
+	 *     -> aes_encrypt_key128 -> aes_encrypt_key
+	 * with FAR=0x78 / ESR=0x96000005 - a level-1 translation fault reading
+	 * offset 0x78 of a NULL pointer, 0x78 being ccaes_cbc_encrypt's slot in
+	 * struct crypto_functions. This is the same never-registered-kext
+	 * pattern already handled for pthread (bsd_pthread_stub.c), for SHA-2
+	 * and MD5 (replaced with from-scratch implementations), and inside
+	 * read_random() itself, which falls back to read_erandom() under
+	 * exactly this condition.
+	 *
+	 * Degrade rather than crash: report failure so callers that check can
+	 * disable whatever needed AES (tcp_tfo_init does - see tcp_subr.c),
+	 * instead of taking the whole kernel down for an optional feature.
+	 * Note the existing panic below is deliberately left as-is: a context
+	 * too small for the mode is a genuine build-time inconsistency, not a
+	 * missing-kext condition.
+	 *
+	 * A real AES implementation registered into g_crypto_funcs is the
+	 * general fix - see docs/backlog.md.
+	 */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->ccaes_cbc_encrypt == NULL) {
+		return aes_error;
+	}
+
 	const struct ccmode_cbc *cbc = g_crypto_funcs->ccaes_cbc_encrypt;
 
 	/* Make sure the context size for the mode fits in the one we have */

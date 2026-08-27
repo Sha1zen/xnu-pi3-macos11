@@ -1,33 +1,38 @@
 /*
- * corecrypto_sha2.c - standalone SHA-256/384/512, replacing this file's
- * original corecrypto-dispatch implementation for xnu-on-rpi3.
+ * corecrypto_sha2.c - SHA-256/384/512 for xnu-on-rpi3.
  *
- * The original implementation of every function in this file was a thin
- * wrapper indirecting through a global function-table pointer
- * (g_crypto_funcs, libkern/crypto/register_crypto.c) that real macOS's
- * corecrypto kext populates via register_crypto_functions() at boot. That
- * kext's real implementation was never part of any apple-oss-distributions
- * release (same situation as launchd/pthread.kext - see project memory) and
- * nothing in this from-scratch kernel ever calls register_crypto_functions()
- * - g_crypto_funcs stays NULL forever, so every one of these functions
- * dereferenced a null pointer + a small struct-member offset the first time
- * any caller ever exercised them (confirmed via a real fault, FAR=0x30,
- * ESR=0x96000005 - translation fault - inside SHA256_Init, called from
- * vm_kernel_addrhash() by devfs_mount(), the very first real caller in this
- * project's boot history).
+ * None of these functions ever went through g_crypto_funcs
+ * (libkern/crypto/register_crypto.c) - real macOS's closed-source
+ * corecrypto kext populates that table via register_crypto_functions(),
+ * but SHA256_Init/_Update/_Final etc are plain global functions with no
+ * table indirection anywhere in their call chain (cs_hash_sha256,
+ * cdhash/boot-session-UUID hashing in kern_exec.c, chunklist.c all call
+ * them directly). The original bug was a NULL+offset fault reached a
+ * different way: an earlier revision of this file *was* a thin
+ * g_crypto_funcs wrapper (nothing ever calls register_crypto_functions()
+ * in this from-scratch kernel, so the table stays NULL forever), fixed by
+ * replacing it with a from-scratch FIPS 180-4 implementation for all three
+ * digests.
  *
- * Rather than stub these out, this is a real, standard, from-scratch
- * SHA-256/384/512 implementation (FIPS 180-4) - these functions are
- * genuinely used for real purposes elsewhere in this kernel (address
- * obfuscation via vm_kernel_addrhash, and likely code-signing-hash-adjacent
- * paths in bsd/kern/ubc_subr.c), not just placeholders.
+ * SHA-256 has since been upgraded off that from-scratch path (2026-08-27,
+ * docs/backlog.md P2 item 0b): SHA256_Init/_Update/_Final now call the
+ * real, unmodified, audited Apple corecrypto core directly
+ * (ccsha256_di()/ccdigest_init/_update/_final -
+ * osfmk/corecrypto/ccsha256_di.c, ccsha256_ltc_di.c, ccdigest_*.c),
+ * already compiled into this exact kernel and already proven working by
+ * osfmk/prng/prng_random.c's bootseed_init(), which calls the same
+ * ccdigest_init()/&ccsha256_ltc_di pair. SHA-384/512 stay on the
+ * from-scratch path below - real corecrypto bodies for those two don't
+ * exist anywhere in this checkout (only headers), confirmed absent from
+ * both third_party/xnu-7195 and third_party/xnu-latest's SHA-512 case.
  *
  * SHA256_CTX/SHA384_CTX/SHA512_CTX (libkern/libkern/crypto/sha2.h) are
- * opaque corecrypto-sized byte buffers (ccdigest_ctx_decl(...)), sized
- * generously enough for real corecrypto internal state - comfortably large
- * enough for the plain state structs below (checked via _Static_assert).
- * Nothing outside this kernel ever consumes these contexts directly, so
- * there's no ABI compatibility requirement with corecrypto's actual layout.
+ * real corecrypto-shaped opaque contexts (ccdigest_ctx_decl(...)) - for
+ * SHA-256 that's now load-bearing (it's exactly what real ccdigest_init/
+ * _update/_final expect); for SHA-384/512 it's still just generously
+ * sized scratch space for the plain state structs below (checked via
+ * _Static_assert), with no ABI requirement against corecrypto's actual
+ * layout since nothing outside this kernel consumes those two directly.
  */
 
 #include <libkern/crypto/sha2.h>
@@ -65,145 +70,40 @@ store_be64(uint8_t *p, uint64_t v)
 	store_be32(p + 4, (uint32_t)v);
 }
 
-/* ================= SHA-256 ================= */
-
-struct sha256_state {
-	uint32_t h[8];
-	uint64_t total_len; /* bytes processed so far */
-	uint8_t  buf[64];
-	uint32_t buf_len;
-};
-_Static_assert(sizeof(struct sha256_state) <= sizeof(SHA256_CTX),
-    "sha256_state must fit in SHA256_CTX's opaque buffer");
-
-static const uint32_t sha256_k[64] = {
-	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-};
-
-static inline uint32_t
-rotr32(uint32_t x, int n)
-{
-	return (x >> n) | (x << (32 - n));
-}
-
-static void
-sha256_compress(struct sha256_state *st, const uint8_t block[64])
-{
-	uint32_t w[64];
-	for (int i = 0; i < 16; i++) {
-		w[i] = load_be32(block + i * 4);
-	}
-	for (int i = 16; i < 64; i++) {
-		uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-		uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
-		w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-	}
-
-	uint32_t a = st->h[0], b = st->h[1], c = st->h[2], d = st->h[3];
-	uint32_t e = st->h[4], f = st->h[5], g = st->h[6], h = st->h[7];
-
-	for (int i = 0; i < 64; i++) {
-		uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-		uint32_t ch = (e & f) ^ (~e & g);
-		uint32_t temp1 = h + S1 + ch + sha256_k[i] + w[i];
-		uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-		uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-		uint32_t temp2 = S0 + maj;
-
-		h = g; g = f; f = e; e = d + temp1;
-		d = c; c = b; b = a; a = temp1 + temp2;
-	}
-
-	st->h[0] += a; st->h[1] += b; st->h[2] += c; st->h[3] += d;
-	st->h[4] += e; st->h[5] += f; st->h[6] += g; st->h[7] += h;
-}
-
+/*
+ * ================= SHA-256 =================
+ *
+ * Wired to the real, audited corecrypto core rather than a from-scratch
+ * compress loop (docs/backlog.md P2 item 0b, acted on 2026-08-27).
+ * ccsha256_di()/ccdigest_init/ccdigest_update/ccdigest_final are real,
+ * unmodified Apple corecrypto (osfmk/corecrypto/ccsha256_di.c,
+ * ccsha256_ltc_di.c, ccdigest_*.c), already marked `standard` in
+ * osfmk/conf/files and already proven working in this exact kernel build
+ * by osfmk/prng/prng_random.c's bootseed_init(), which calls this same
+ * ccdigest_init/&ccsha256_ltc_di pair directly. SHA256_CTX's `ctx` field
+ * is itself a real ccdigest_ctx_decl array (libkern/libkern/crypto/sha2.h)
+ * sized for corecrypto's own state layout, so no adapter is needed beyond
+ * routing these three entry points to the real calls. SHA-384/512 stay on
+ * the from-scratch path below (real corecrypto bodies for those are
+ * absent from this checkout, see backlog) and so still need the shared
+ * big-endian helpers above.
+ */
 void
 SHA256_Init(SHA256_CTX *ctx)
 {
-	struct sha256_state *st = (struct sha256_state *)(void *)ctx;
-	st->h[0] = 0x6a09e667; st->h[1] = 0xbb67ae85;
-	st->h[2] = 0x3c6ef372; st->h[3] = 0xa54ff53a;
-	st->h[4] = 0x510e527f; st->h[5] = 0x9b05688c;
-	st->h[6] = 0x1f83d9ab; st->h[7] = 0x5be0cd19;
-	st->total_len = 0;
-	st->buf_len = 0;
+	ccdigest_init(ccsha256_di(), ctx->ctx);
 }
 
 void
 SHA256_Update(SHA256_CTX *ctx, const void *data, size_t len)
 {
-	struct sha256_state *st = (struct sha256_state *)(void *)ctx;
-	const uint8_t *p = (const uint8_t *)data;
-
-	st->total_len += len;
-
-	if (st->buf_len > 0) {
-		size_t take = 64 - st->buf_len;
-		if (take > len) {
-			take = len;
-		}
-		memcpy(st->buf + st->buf_len, p, take);
-		st->buf_len += (uint32_t)take;
-		p += take;
-		len -= take;
-		if (st->buf_len == 64) {
-			sha256_compress(st, st->buf);
-			st->buf_len = 0;
-		}
-	}
-
-	while (len >= 64) {
-		sha256_compress(st, p);
-		p += 64;
-		len -= 64;
-	}
-
-	if (len > 0) {
-		memcpy(st->buf, p, len);
-		st->buf_len = (uint32_t)len;
-	}
+	ccdigest_update(ccsha256_di(), ctx->ctx, len, data);
 }
 
 void
 SHA256_Final(void *digest, SHA256_CTX *ctx)
 {
-	struct sha256_state *st = (struct sha256_state *)(void *)ctx;
-	uint64_t bit_len = st->total_len * 8;
-
-	uint8_t pad = 0x80;
-	SHA256_Update(ctx, &pad, 1);
-
-	uint8_t zero = 0;
-	while (st->buf_len != 56) {
-		SHA256_Update(ctx, &zero, 1);
-	}
-
-	uint8_t lenbuf[8];
-	store_be64(lenbuf, bit_len);
-	/* append directly - avoid recursing through Update's total_len math */
-	memcpy(st->buf + 56, lenbuf, 8);
-	sha256_compress(st, st->buf);
-
-	uint8_t *out = (uint8_t *)digest;
-	for (int i = 0; i < 8; i++) {
-		store_be32(out + i * 4, st->h[i]);
-	}
+	ccdigest_final(ccsha256_di(), ctx->ctx, (unsigned char *)digest);
 }
 
 /* ================= SHA-512 / SHA-384 ================= */

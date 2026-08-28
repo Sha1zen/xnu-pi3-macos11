@@ -27,38 +27,29 @@
  * returns, just enough that bsd_init()'s own pthread_init() call and normal
  * BSD proc lifecycle (pth_proc_hashinit/pth_proc_hashdelete, called
  * unconditionally from fork/exit) don't crash. psynch_* and
- * bsdthread_terminate/thread_selfid still return an error rather than
- * doing anything real (psynch_* is real, substantial design+
- * implementation work of its own, deliberately out of scope here - see
- * docs/roadmap.md Phase 7.5). bsdthread_register and the five workq_*
- * thread-stack hooks are real as of this pass (bsd_pthread_workq.c).
+ * thread_selfid still return an error rather than doing anything real
+ * (psynch_* is
+ * real, substantial design+implementation work of its own, deliberately
+ * out of scope here - see docs/roadmap.md Phase 7.5). bsdthread_register,
+ * the five workq_* thread-stack hooks, and (as of 2026-08-25)
+ * bsdthread_create/bsdthread_terminate are all real as of this pass
+ * (bsd_pthread_workq.c).
  *
- * bsdthread_create() below IS now real: it creates a genuine second Mach
- * thread in the calling task using exactly the primitives Apple's real
- * pthread_shims.c hands the (closed-source) pthread.kext for this purpose
- * via the `pthread_kern` callback table (pthread_kern->thread_create /
- * ->thread_set_wq_state64 / ->thread_resume - see pthread_shims.c's
- * `pthread_callbacks` initializer, which wires these directly to the real,
- * open-source osfmk/kern/thread.c and osfmk/arm64/status.c implementations
- * already used elsewhere in this exact kernel - e.g.
- * bsd/dev/arm/unix_signal.c's sendsig_set_thread_state64() already sets up
- * an arm_thread_state64_t for a thread returning to userspace via the same
- * real signal-delivery path, and osfmk/arm64/locore.s's
- * thread_bootstrap_return -> arm64_thread_exception_return is the exact
- * same real, already-proven-safe return-to-EL0 path every exec() in this
- * project already goes through). No new machine-dependent code was written
- * for this - it is a direct, minimal use of existing real primitives.
- *
- * This does NOT implement the real pthread ABI (no libpthread trampoline,
- * no TSD/dispatch-queue wiring, no thread port returned for
- * bsdthread_terminate/pthread_kill to target) - it hands the new thread's
- * PC/SP/x0 directly from bsdthread_create()'s own raw arguments, which is
- * enough for a real second thread to run real code, but is NOT
- * pthread_create()-compatible. bsdthread_terminate and psynch_* remain
- * stubbed; see the real test program at tools/pthread_kthread_test/ for
- * the smallest real, verified exercise of this specific path (workqueue
- * thread creation has its own separate real test, see
- * bsd_pthread_workq.c and docs/roadmap.md Phase 7.5).
+ * bsdthread_create()/bsdthread_terminate() are now real, full
+ * implementations of the real pthread ABI (verbatim ports of
+ * third_party/libpthread/kern/kern_support.c's real
+ * _bsdthread_create/_bsdthread_terminate, see bsd_pthread_workq.c) - a
+ * real Mach thread port is allocated and returned in x1 (matching
+ * _pthread_start(self, kport, fun, arg, stacksize, pflags)'s real
+ * parameter order), and bsdthread_terminate() really deallocates the
+ * caller's stack and self-terminates via thread_terminate(current_thread())
+ * before returning to userspace via pthread_kern->thread_exception_return().
+ * This supersedes an earlier, deliberately minimal version documented
+ * here (no thread port, PC/SP/x0 set directly from raw arguments, not
+ * pthread_create()-compatible) - see git history for that version if
+ * needed. See docs/daemon-roadmap.md's Phase 6.6 entry for the real
+ * userland gap this closes (pthread_join()/_pthread_terminate() call
+ * bsdthread_terminate() unconditionally at thread exit).
  */
 
 #include <sys/param.h>
@@ -110,85 +101,26 @@ stub_pth_proc_hashdelete(proc_t p)
 }
 
 /*
- * real_bsdthread_create() - minimal real second-Mach-thread creation.
- *
- * Sequence (deliberately mirrors bsd/kern/kern_fork.c's fork()/fork1() and
- * bsd/kern/kern_exec.c's new-thread setup, both of which already do
- * "create -> set initial register state -> resume -> drop our creation
- * reference" for a thread that's about to run real userspace code on this
- * exact kernel):
- *
- *   1. pthread_kern->thread_create(current_task(), &th) - real
- *      osfmk/kern/thread.c thread_create(). Returns a thread that is
- *      already suspended (thread_create() always leaves a fresh thread
- *      with user_stop_count=1 - see osfmk/kern/thread.c) so its register
- *      state can be set safely before anything can run.
- *   2. pthread_kern->thread_set_wq_state64(th, &state) - real
- *      osfmk/arm64/status.c thread_set_wq_state64(), the same primitive
- *      pthread.kext itself would have used for this. Sets pc/sp/x0 only;
- *      no pthread-ABI trampoline args (kport/self/flags in x1-x3) because
- *      this does not implement the real libpthread contract, only real
- *      thread creation.
- *   3. pthread_kern->thread_resume(th) - undoes the create-time suspend;
- *      the thread now runs for real, entering userspace at user_func via
- *      thread_bootstrap_return -> arm64_thread_exception_return (real,
- *      already-exercised-by-every-exec() path).
- *   4. thread_deallocate(th) - drop our local creation reference, exactly
- *      like fork()'s "drop the extra references we got during the
- *      creation" (kern_fork.c) does for the child thread it just started.
- *      The thread continues to exist/run via the task's own internal
- *      thread-list reference, not this one.
- *
- * No thread port is created/returned (real bsdthread_create returns a
- * mach port name in *retval for later pthread_kill/bsdthread_terminate
- * use) - out of scope for this minimal step, so *retval is left 0 and
- * there is currently no way for userspace to terminate/signal the new
- * thread individually. It exits only when the whole task exits (real,
- * pre-existing task_terminate_internal() teardown, exercised here for the
- * first time with >1 live thread in a task - this is exactly the case
- * tools/pthread_kthread_test/ is designed to exercise and QEMU-verify).
+ * real_bsdthread_create()/real_bsdthread_terminate(): now real, verbatim
+ * ports from third_party/libpthread/kern/kern_support.c's
+ * _bsdthread_create/_bsdthread_terminate (same real infrastructure
+ * real_bsdthread_register above already uses) -- see
+ * bsd/kern/bsd_pthread_workq.c's own header comment for the full
+ * evidence trail. This supersedes an earlier, deliberately minimal
+ * version that lived here (no real thread port allocated/returned, no
+ * pthread-ABI register convention, `bsdthread_terminate` an
+ * unconditional ENOTSUP stub) -- real userland `pthread_join()`/
+ * `_pthread_terminate()` call `bsdthread_terminate()` unconditionally
+ * at thread exit, which made every userland thread whose start routine
+ * returned hit `PTHREAD_INTERNAL_CRASH`. Both functions now live in
+ * bsd_pthread_workq.c, declared extern below (same pattern as
+ * real_bsdthread_register).
  */
-static int
-real_bsdthread_create(struct proc *p, user_addr_t user_func, user_addr_t user_funcarg,
-    user_addr_t user_stack, user_addr_t user_pthread, uint32_t flags, user_addr_t *retval)
-{
-	thread_t th = THREAD_NULL;
-	kern_return_t kr;
-	arm_thread_state64_t state;
-
-	(void)p; (void)user_pthread; (void)flags;
-
-	if (retval) {
-		*retval = 0;
-	}
-
-	kr = pthread_kern->thread_create(current_task(), &th);
-	if (kr != KERN_SUCCESS || th == THREAD_NULL) {
-		return EAGAIN;
-	}
-
-	bzero(&state, sizeof(state));
-	state.pc = user_func;
-	state.sp = user_stack;
-	state.x[0] = user_funcarg;
-
-	kr = pthread_kern->thread_set_wq_state64(th, (thread_state_t)&state);
-	if (kr != KERN_SUCCESS) {
-		thread_terminate(th);
-		thread_deallocate(th);
-		return EINVAL;
-	}
-
-	kr = pthread_kern->thread_resume(th);
-	if (kr != KERN_SUCCESS) {
-		thread_terminate(th);
-		thread_deallocate(th);
-		return EINVAL;
-	}
-
-	thread_deallocate(th);
-	return 0;
-}
+extern int real_bsdthread_create(struct proc *p, user_addr_t user_func,
+    user_addr_t user_funcarg, user_addr_t user_stack, user_addr_t user_pthread,
+    uint32_t flags, user_addr_t *retval);
+extern int real_bsdthread_terminate(struct proc *p, user_addr_t stackaddr,
+    size_t size, uint32_t kthport, uint32_t sem, int32_t *retval);
 
 static int
 stub_bsdthread_register2(struct proc *p, user_addr_t threadstart, user_addr_t wqthread,
@@ -197,17 +129,6 @@ stub_bsdthread_register2(struct proc *p, user_addr_t threadstart, user_addr_t wq
 {
 	(void)p; (void)threadstart; (void)wqthread; (void)flags; (void)stack_addr_hint;
 	(void)targetconc_ptr; (void)dispatchqueue_offset; (void)tsd_offset;
-	if (retval) {
-		*retval = 0;
-	}
-	return ENOTSUP;
-}
-
-static int
-stub_bsdthread_terminate(struct proc *p, user_addr_t stackaddr, size_t size,
-    uint32_t kthport, uint32_t sem, int32_t *retval)
-{
-	(void)p; (void)stackaddr; (void)size; (void)kthport; (void)sem;
 	if (retval) {
 		*retval = 0;
 	}
@@ -264,7 +185,7 @@ static const struct pthread_functions_s bsd_pthread_stub_functions = {
 	.pth_proc_hashdelete = stub_pth_proc_hashdelete,
 	.bsdthread_create = real_bsdthread_create,
 	.bsdthread_register = real_bsdthread_register,
-	.bsdthread_terminate = stub_bsdthread_terminate,
+	.bsdthread_terminate = real_bsdthread_terminate,
 	.thread_selfid = stub_thread_selfid,
 	.psynch_mutexwait = (typeof(((pthread_functions_t)0)->psynch_mutexwait))stub_psynch_error,
 	.psynch_mutexdrop = (typeof(((pthread_functions_t)0)->psynch_mutexdrop))stub_psynch_error,

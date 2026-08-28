@@ -868,6 +868,20 @@ timer_queue_expire_with_options(
 	uint64_t cur_deadline = deadline;
 	timer_queue_lock_spin(queue);
 
+	/* TEMP DIAGNOSTIC (backlog P0#7, 2026-08-27): is this project's real,
+	 * QEMU-reproducible "yes.macho panics via INTERRUPT_MASKED_DEBUG"
+	 * bug caused by an unbounded number of timer_call entries piling up
+	 * on this per-CPU queue (each iteration below does real, non-trivial
+	 * work) rather than something else entirely? Cheap (single
+	 * kprintf-class log line, only when the queue is unusually deep), and
+	 * safe to leave in briefly to gather one real data point from an
+	 * actual panic-triggering boot before deciding where to look next. */
+	uint64_t __diag_queue_count = queue->count;
+	if (__diag_queue_count > 32) {
+		kprintf("TEMP DIAGNOSTIC: timer_queue_expire: queue=%p count=%llu at entry\n",
+		    (void *)queue, __diag_queue_count);
+	}
+
 	while (!queue_empty(&queue->head)) {
 		/* Upon processing one or more timer calls, refresh the
 		 * deadline to account for time elapsed in the callout
@@ -997,6 +1011,12 @@ timer_queue_expire_with_options(
 		queue->earliest_soft_deadline = (call->tc_flags & TIMER_CALL_RATELIMITED) ? call->tc_pqlink.deadline: call->tc_soft_deadline;
 	} else {
 		queue->earliest_soft_deadline = cur_deadline = UINT64_MAX;
+	}
+
+	/* TEMP DIAGNOSTIC (backlog P0#7) - see matching comment above. */
+	if (__diag_queue_count > 32 || tc_iterations > 32) {
+		kprintf("TEMP DIAGNOSTIC: timer_queue_expire: queue=%p entry_count=%llu tc_iterations=%u remaining_count=%llu\n",
+		    (void *)queue, __diag_queue_count, tc_iterations, queue->count);
 	}
 
 	timer_queue_unlock(queue);

@@ -462,6 +462,19 @@ BCM2837DWC2::allocateDMABuffer(void)
 	 * and this buffer is nowhere near hot enough for the difference to
 	 * matter).
 	 *
+	 * kIOMapWriteCombineCache, not kIOMapInhibitCache: on ARM64 the
+	 * latter maps VM_WIMG_IO (MAIR_DISABLE, Device-nGnRnE), which
+	 * unconditionally faults on any unaligned multi-byte access
+	 * regardless of SCTLR.A. doTransfer()'s memcpy() in/out of this
+	 * buffer runs at arbitrary transfer lengths (e.g. real Ethernet
+	 * frame sizes), essentially never aligned, and reliably took an
+	 * "Unaligned kernel data abort" panic on real RX traffic.
+	 * kIOMapWriteCombineCache maps VM_WIMG_WCOMB (MAIR_WRITECOMB, real
+	 * Normal Non-Cacheable memory), which XNU's SCTLR_EL1 config (no
+	 * SCTLR_A) permits unaligned access on -- matching what this
+	 * comment already assumed ("uncached") without actually being the
+	 * memory type that promise requires.
+	 *
 	 * kIOMemoryMapperNone keeps any IOMapper out of the picture so
 	 * getPhysicalSegment() returns a true physical address rather than a
 	 * remapped DMA one; this platform has no IOMMU, and the bus address
@@ -473,7 +486,7 @@ BCM2837DWC2::allocateDMABuffer(void)
 	fDMABuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
 	    kernel_task,
 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous |
-	    kIOMapInhibitCache | kIOMemoryMapperNone,
+	    kIOMapWriteCombineCache | kIOMemoryMapperNone,
 	    kDWC2DataBufferSize,
 	    0x3FFFFFFFULL & ~0x3ULL); // 4-byte aligned, DWC2 requires it
 
@@ -891,9 +904,16 @@ BCM2837DWC2::doTransferRetrying(DWC2Endpoint *ep, uint8_t *pid, bool isIn,
 }
 
 IOReturn
-BCM2837DWC2::transfer(DWC2Endpoint *ep, void *buffer, uint32_t len, uint32_t *actualLen)
+BCM2837DWC2::transfer(DWC2Endpoint *ep, void *buffer, uint32_t len, uint32_t *actualLen, uint32_t timeoutMS)
 {
-	return doTransferRetrying(ep, &ep->toggle, ep->epIsIn, buffer, len, actualLen, 1000);
+	// See fTransferLock's header comment: this and controlTransfer() are
+	// the only two ways into the shared channel/DMA buffer, and callers
+	// (SMSC9514Ethernet's TX via outputPacket() and RX via fRxTimer) run
+	// on genuinely different, unsynchronized threads.
+	IOLockLock(fTransferLock);
+	IOReturn ret = doTransferRetrying(ep, &ep->toggle, ep->epIsIn, buffer, len, actualLen, timeoutMS);
+	IOLockUnlock(fTransferLock);
+	return ret;
 }
 
 IOReturn
@@ -913,11 +933,19 @@ BCM2837DWC2::controlTransfer(DWC2Endpoint *ep, const USBSetupPacket *setup,
 		*actualLen = 0;
 	}
 
+	// Locked for the whole SETUP+DATA+STATUS sequence, not per-stage: a
+	// foreign transfer (e.g. an RX poll) interleaving between this
+	// transfer's own stages would be just as real a corruption as one
+	// interleaving mid-chunk within a single stage. See fTransferLock's
+	// header comment.
+	IOLockLock(fTransferLock);
+
 	// SETUP stage: always OUT, always the SETUP PID, always 8 bytes.
 	USBSetupPacket setupCopy = *setup;
 	uint8_t pid = kHCPID_SETUP;
 	ret = doTransferRetrying(ep, &pid, false, &setupCopy, sizeof(setupCopy), &dummy, 1000);
 	if (ret != kIOReturnSuccess) {
+		IOLockUnlock(fTransferLock);
 		return ret;
 	}
 
@@ -927,6 +955,7 @@ BCM2837DWC2::controlTransfer(DWC2Endpoint *ep, const USBSetupPacket *setup,
 		pid = kHCPID_DATA1;
 		ret = doTransferRetrying(ep, &pid, dataIn, data, dataLen, &moved, 1000);
 		if (ret != kIOReturnSuccess) {
+			IOLockUnlock(fTransferLock);
 			return ret;
 		}
 		if (actualLen != NULL) {
@@ -941,11 +970,8 @@ BCM2837DWC2::controlTransfer(DWC2Endpoint *ep, const USBSetupPacket *setup,
 	bool statusIn = (dataLen > 0 && data != NULL) ? !dataIn : true;
 	pid = kHCPID_DATA1;
 	ret = doTransferRetrying(ep, &pid, statusIn, fDMAVirt, 0, &dummy, 1000);
-	if (ret != kIOReturnSuccess) {
-		return ret;
-	}
-
-	return kIOReturnSuccess;
+	IOLockUnlock(fTransferLock);
+	return ret;
 }
 
 IOReturn
@@ -972,6 +998,12 @@ BCM2837DWC2::start(IOService *provider)
 	}
 
 	IOLog("BCM2837DWC2: start\n");
+
+	fTransferLock = IOLockAlloc();
+	if (fTransferLock == NULL) {
+		IOLog("BCM2837DWC2: IOLockAlloc failed\n");
+		return false;
+	}
 
 	IODeviceMemory *devMem = provider->getDeviceMemoryWithIndex(0);
 	if (devMem == NULL) {
@@ -1227,5 +1259,9 @@ BCM2837DWC2::free(void)
 		fRegMap = NULL;
 	}
 	fRegBase = NULL;
+	if (fTransferLock != NULL) {
+		IOLockFree(fTransferLock);
+		fTransferLock = NULL;
+	}
 	super::free();
 }

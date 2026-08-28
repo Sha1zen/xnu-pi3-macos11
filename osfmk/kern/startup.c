@@ -775,6 +775,24 @@ kernel_bootstrap_thread(void)
 	read_random(&vm_kernel_addrhash_salt, sizeof(vm_kernel_addrhash_salt));
 	read_random(&vm_kernel_addrhash_salt_ext, sizeof(vm_kernel_addrhash_salt_ext));
 
+	/*
+	 * Real AES core (docs/backlog.md item 0a): register_crypto_functions()
+	 * writes g_crypto_funcs, a SECURITY_READ_ONLY_LATE global
+	 * (libkern/crypto/register_crypto.c) - it must run before
+	 * machine_lockdown() below makes that page read-only, exactly like a
+	 * real corecrypto kext's registration would (kexts finish loading
+	 * well before lockdown too). Tried once inside bsd_init(), which
+	 * runs after this point: real QEMU boot produced "Unexpected fault
+	 * in kernel static region" (ESR=0x9600004f, a write-permission
+	 * fault) writing g_crypto_funcs after lockdown had already made it
+	 * read-only - moved here as the fix, verified as the actual cause,
+	 * not guessed. Panics on its own self-test failure rather than let
+	 * the kernel boot with unverified AES (see corecrypto_aes_register.c).
+	 */
+	kernel_bootstrap_log("xnu_rpi3_register_freebsd_aes");
+	extern void xnu_rpi3_register_freebsd_aes(void); /* libkern/crypto/corecrypto_aes_register.c */
+	xnu_rpi3_register_freebsd_aes();
+
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");
 	machine_lockdown();

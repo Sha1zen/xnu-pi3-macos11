@@ -88,13 +88,22 @@ libkern/zlib/zutil.c                                    optional zlibc
 libkern/crypto/register_crypto.c		optional crypto
 libkern/crypto/corecrypto_sha2.c		standard
 libkern/crypto/corecrypto_sha1.c		optional crypto
-libkern/crypto/corecrypto_md5.c			optional crypto
 libkern/crypto/corecrypto_des.c			optional crypto
 libkern/crypto/corecrypto_aes.c			optional crypto
 libkern/crypto/corecrypto_aesxts.c		optional crypto
 libkern/crypto/corecrypto_rand.c		optional crypto
 libkern/crypto/corecrypto_rsa.c		    optional crypto
 libkern/crypto/corecrypto_chacha20poly1305.c	optional	crypto
+
+# FreeBSD-sourced AES core (docs/backlog.md item 0a) + corecrypto-shaped
+# register_crypto_functions() adapter -- corecrypto's own AES core is
+# confirmed absent from apple-oss-distributions.
+libkern/crypto/freebsd/rijndael-alg-fst.c	optional	crypto
+libkern/crypto/corecrypto_aes_register.c	optional	crypto
+# FreeBSD-sourced MD5 (RSA reference impl) + SHA-384/512 compress core,
+# replacing this project's from-scratch versions of both.
+libkern/crypto/freebsd/md5c.c			optional crypto
+libkern/crypto/freebsd/sha512_transform.c	standard
 
 libkern/img4/interface.c 		standard
 

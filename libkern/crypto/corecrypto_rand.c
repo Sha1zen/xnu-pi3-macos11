@@ -36,7 +36,20 @@ cc_rand_generate(void *out, size_t outlen)
 	struct ccrng_state *rng_state = NULL;
 	int error = -1;
 
-	if (g_crypto_funcs) {
+	/*
+	 * COMPAT (2026-08-28, docs/backlog.md item 0a): g_crypto_funcs is now
+	 * real (AES registered - libkern/crypto/corecrypto_aes_register.c),
+	 * but only its AES fields are filled; ccrng_fn is deliberately left
+	 * NULL (no RNG source registered here, see read_random()'s own
+	 * read_erandom() fallback for this kernel's real RNG path instead).
+	 * The `if (g_crypto_funcs)` guard below predates that and assumed an
+	 * all-or-nothing real corecrypto kext fill, which is why it doesn't
+	 * check this specific field - true before this table was ever
+	 * non-NULL (dead code either way), a real NULL-function-pointer call
+	 * once it wasn't (found via a real QEMU boot panic, PC=0, inside
+	 * necp_init()'s random_buf() call chain).
+	 */
+	if (g_crypto_funcs && g_crypto_funcs->ccrng_fn) {
 		rng_state = g_crypto_funcs->ccrng_fn(&error);
 		if (rng_state != NULL) {
 			error = ccrng_generate(rng_state, outlen, out);

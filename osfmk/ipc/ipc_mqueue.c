@@ -1061,8 +1061,16 @@ ipc_mqueue_receive(
 		 * ipc_mqueue_receive_continue) never does, the fault is
 		 * inside thread_block()'s own context-switch machinery
 		 * itself, not in any of the setup code bisected so far. */
-		kprintf("IOKITDIAG17: thread=%p self=%p ith_continuation=%p about to call thread_block\n",
-		    self, current_thread(), self->ith_continuation);
+		/* contextData added session 5, 2026-08-29: direct same-boot
+		 * comparison against osfmk/arm64/sleh.c's IOKITDIAG18 (the
+		 * main thread's own contextData at the moment it later
+		 * faults) -- if these two pointers match, the two threads'
+		 * per-thread PCB allocations are aliased (a real allocation
+		 * bug); if they differ, the main thread's OWN, correctly
+		 * separate PCB had the wrong SP value written into it (a
+		 * save/restore path bug instead). */
+		kprintf("IOKITDIAG17: thread=%p self=%p ith_continuation=%p about to call thread_block contextData=%p\n",
+		    self, current_thread(), self->ith_continuation, self->machine.contextData);
 		if (self->ith_continuation) {
 			thread_block(ipc_mqueue_receive_continue);
 		}

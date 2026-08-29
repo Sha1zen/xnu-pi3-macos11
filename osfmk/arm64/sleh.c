@@ -1463,10 +1463,23 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	 * correct and every candidate main-thread race ruled out -- this is
 	 * the actual real fault PC/address/thread this whole investigation
 	 * has been trying to see. */
-	kprintf("IOKITDIAG18: handle_user_abort thread=%p pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx esr=0x%x fault_addr=0x%llx exc=0x%x code0=0x%llx\n",
+	/* TEMP DIAGNOSTIC 2026-08-29 continued, session 5: the userland
+	 * "duplicate static pthread_create" theory (iokit main repo commit
+	 * a07bc1c) was tested and RULED OUT -- fixing it left this exact
+	 * crash unchanged. Narrowing further: is thread1's (the main
+	 * thread's) own machine.contextData (the PCB `ACT_CONTEXT` points
+	 * at, allocated per-thread by machine_thread_create ->
+	 * zalloc(user_ss_zone), osfmk/arm64/pcb.c) genuinely a SEPARATE
+	 * allocation from the second thread's, or -- despite each being a
+	 * real, distinct zalloc() call -- somehow the SAME pointer (which
+	 * would mean the SS64_SP field being read back here was actually
+	 * last WRITTEN by the second thread's own EL0 kernel entry,
+	 * directly explaining the main thread resuming with an SP_EL0
+	 * value that belongs to the second thread's own stack). */
+	kprintf("IOKITDIAG18: handle_user_abort thread=%p pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx esr=0x%x fault_addr=0x%llx exc=0x%x code0=0x%llx contextData=%p\n",
 	    thread, (uint64_t)get_saved_state_pc(state), (uint64_t)get_saved_state_sp(state),
 	    (uint64_t)get_saved_state_fp(state), (uint64_t)get_saved_state_lr(state),
-	    esr, (uint64_t)fault_addr, exc, (uint64_t)codes[0]);
+	    esr, (uint64_t)fault_addr, exc, (uint64_t)codes[0], thread->machine.contextData);
 	exception_triage(exc, codes, numcodes);
 	__builtin_unreachable();
 }

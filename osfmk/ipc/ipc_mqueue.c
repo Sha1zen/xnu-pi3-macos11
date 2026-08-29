@@ -989,7 +989,19 @@ ipc_mqueue_receive_continue(
 	__unused void *param,
 	wait_result_t wresult)
 {
+	/* TEMP DIAGNOSTIC 2026-08-29, launchd bug #6: mach_msg_overwrite_trap's
+	 * own new IOKITDIAG15 prints (osfmk/ipc/mach_msg.c) show the second
+	 * thread reaching "about to call ipc_mqueue_receive" and then never
+	 * printing again -- but that's ALSO exactly what a legitimate,
+	 * NOTREACHED continuation-based block looks like (thread_block()
+	 * with a non-null continuation never returns to that call frame; it
+	 * resumes HERE instead, on wakeup, not by returning up the original
+	 * stack). This print distinguishes "genuinely still blocked/normal"
+	 * from "crashed before ever getting woken up". */
+	kprintf("IOKITDIAG16: ipc_mqueue_receive_continue entry thread=%p wresult=%d\n",
+	    current_thread(), wresult);
 	ipc_mqueue_receive_results(wresult);
+	kprintf("IOKITDIAG16: thread=%p past ipc_mqueue_receive_results\n", current_thread());
 	mach_msg_receive_continue();  /* hard-coded for now */
 }
 
@@ -1041,6 +1053,16 @@ ipc_mqueue_receive(
 		    c_ipc_mqueue_receive_block_user++ :
 		    c_ipc_mqueue_receive_block_kernel++);
 
+		/* TEMP DIAGNOSTIC 2026-08-29, launchd bug #6: last safe
+		 * (still-preemptible, no locks held) print before the real
+		 * NOTREACHED context-switch/continuation call -- confirms
+		 * reachability up to exactly this point. If this fires but
+		 * IOKITDIAG16 (mach_msg.c/this file's own
+		 * ipc_mqueue_receive_continue) never does, the fault is
+		 * inside thread_block()'s own context-switch machinery
+		 * itself, not in any of the setup code bisected so far. */
+		kprintf("IOKITDIAG17: thread=%p self=%p ith_continuation=%p about to call thread_block\n",
+		    self, current_thread(), self->ith_continuation);
 		if (self->ith_continuation) {
 			thread_block(ipc_mqueue_receive_continue);
 		}
@@ -1222,17 +1244,30 @@ ipc_mqueue_receive_on_thread(
 	 * will be converted to to turnstile waitq
 	 * in waitq_assert_wait instead of global waitqs.
 	 */
+	/* TEMP DIAGNOSTIC 2026-08-29, launchd bug #6: bisecting exactly
+	 * where inside ipc_mqueue_receive_on_thread() a bsdthread_create()-
+	 * spawned thread's blocking receive dies (main thread's own receive
+	 * never reaches here at all -- its message is already ready, so it
+	 * takes the THREAD_NOT_WAITING return above). See
+	 * osfmk/ipc/mach_msg.c's IOKITDIAG15 and this file's own IOKITDIAG16
+	 * for the userland+continuation-side half of this bisection. */
+	kprintf("IOKITDIAG17: thread=%p imq_is_turnstile_proxy=%d about to prepare turnstile\n",
+	    thread, imq_is_turnstile_proxy(mqueue));
 	if (imq_is_turnstile_proxy(mqueue)) {
 		ipc_port_t port = ip_from_mq(mqueue);
 		rcv_turnstile = turnstile_prepare((uintptr_t)port,
 		    port_rcv_turnstile_address(port),
 		    TURNSTILE_NULL, TURNSTILE_SYNC_IPC);
+		kprintf("IOKITDIAG17: thread=%p past turnstile_prepare rcv_turnstile=%p\n",
+		    thread, rcv_turnstile);
 
 		ipc_port_recv_update_inheritor(port, rcv_turnstile,
 		    TURNSTILE_DELAYED_UPDATE);
+		kprintf("IOKITDIAG17: thread=%p past ipc_port_recv_update_inheritor\n", thread);
 	}
 
 	thread_set_pending_block_hint(thread, kThreadWaitPortReceive);
+	kprintf("IOKITDIAG17: thread=%p about to call waitq_assert_wait64_locked\n", thread);
 	wresult = waitq_assert_wait64_locked(&mqueue->imq_wait_queue,
 	    IPC_MQUEUE_RECEIVE,
 	    interruptible,
@@ -1240,12 +1275,14 @@ ipc_mqueue_receive_on_thread(
 	    deadline,
 	    TIMEOUT_NO_LEEWAY,
 	    thread);
+	kprintf("IOKITDIAG17: thread=%p past waitq_assert_wait64_locked wresult=%d\n", thread, wresult);
 	/* preposts should be detected above, not here */
 	if (wresult == THREAD_AWAKENED) {
 		panic("ipc_mqueue_receive_on_thread: sleep walking");
 	}
 
 	imq_unlock(mqueue);
+	kprintf("IOKITDIAG17: thread=%p past imq_unlock, about to return wresult=%d\n", thread, wresult);
 
 	/* Check if its a port mqueue and if it needs to call turnstile_update_inheritor_complete */
 	if (rcv_turnstile != TURNSTILE_NULL) {

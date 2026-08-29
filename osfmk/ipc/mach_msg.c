@@ -490,12 +490,16 @@ mach_msg_receive_continue(void)
 	mach_msg_return_t mr;
 	thread_t self = current_thread();
 
+	kprintf("IOKITDIAG16: mach_msg_receive_continue entry thread=%p ith_state=%d\n",
+	    self, self->ith_state);
 	ipc_port_thread_group_unblocked();
 	if (self->ith_state == MACH_PEEK_READY) {
 		mr = MACH_PEEK_READY;
 	} else {
 		mr = mach_msg_receive_results(NULL);
 	}
+	kprintf("IOKITDIAG16: thread=%p mach_msg_receive_continue about to call ith_continuation=%p mr=0x%x\n",
+	    self, self->ith_continuation, mr);
 	(*self->ith_continuation)(mr);
 }
 
@@ -527,6 +531,19 @@ mach_msg_overwrite_trap(
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
 	vm_map_t map = current_map();
 
+	/* TEMP DIAGNOSTIC 2026-08-29, launchd bug #6: userland-side
+	 * instrumentation (iokit/tools/userland_staging/mach_msg_real.c's
+	 * iokit_diag12_dump) isolated the crash to "inside/immediately after
+	 * the raw MACH_MSG_TRAP syscall itself", only on launchd's second
+	 * (bsdthread_create()-spawned) thread, with a verified-legitimate
+	 * message -- see iokit/docs/backlog.md item d11's 2026-08-29 update.
+	 * Bisecting which real kernel-side sub-step (ipc_kmsg_get/copyin/send
+	 * for the SEND phase, ipc_mqueue_copyin/receive for the RCV phase)
+	 * is where a bsdthread_create()-spawned thread's calling context
+	 * diverges from the main/exec-created thread's, which succeeds. */
+	kprintf("IOKITDIAG15: mach_msg_overwrite_trap entry thread=%p option=0x%x send_size=%u rcv_size=%u rcv_name=0x%x\n",
+	    current_thread(), (unsigned)option, (unsigned)send_size, (unsigned)rcv_size, (unsigned)rcv_name);
+
 	/* Only accept options allowed by the user */
 	option &= MACH_MSG_OPTION_USER;
 
@@ -537,6 +554,8 @@ mach_msg_overwrite_trap(
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
 
 		mr = ipc_kmsg_get(msg_addr, send_size, &kmsg);
+		kprintf("IOKITDIAG15: thread=%p past ipc_kmsg_get mr=0x%x kmsg=%p\n",
+		    current_thread(), mr, mr == MACH_MSG_SUCCESS ? kmsg : NULL);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
@@ -550,6 +569,7 @@ mach_msg_overwrite_trap(
 		    0);
 
 		mr = ipc_kmsg_copyin(kmsg, space, map, priority, &option);
+		kprintf("IOKITDIAG15: thread=%p past ipc_kmsg_copyin mr=0x%x\n", current_thread(), mr);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			ipc_kmsg_free(kmsg);
@@ -558,6 +578,7 @@ mach_msg_overwrite_trap(
 		}
 
 		mr = ipc_kmsg_send(kmsg, option, msg_timeout);
+		kprintf("IOKITDIAG15: thread=%p past ipc_kmsg_send mr=0x%x\n", current_thread(), mr);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			mr |= ipc_kmsg_copyout_pseudo(kmsg, space, map, MACH_MSG_BODY_NULL);
@@ -573,7 +594,11 @@ mach_msg_overwrite_trap(
 		ipc_object_t object;
 		ipc_mqueue_t mqueue;
 
+		kprintf("IOKITDIAG15: thread=%p about to call ipc_mqueue_copyin rcv_name=0x%x\n",
+		    self, (unsigned)rcv_name);
 		mr = ipc_mqueue_copyin(space, rcv_name, &mqueue, &object);
+		kprintf("IOKITDIAG15: thread=%p past ipc_mqueue_copyin mr=0x%x mqueue=%p object=%p\n",
+		    self, mr, mr == MACH_MSG_SUCCESS ? mqueue : NULL, mr == MACH_MSG_SUCCESS ? object : NULL);
 		if (mr != MACH_MSG_SUCCESS) {
 			goto end;
 		}
@@ -604,15 +629,22 @@ mach_msg_overwrite_trap(
 		self->ith_continuation = thread_syscall_return;
 		self->ith_knote = ITH_KNOTE_NULL;
 
+		kprintf("IOKITDIAG15: thread=%p turnstile=%p about to call ipc_mqueue_receive\n",
+		    self, self->turnstile);
 		ipc_mqueue_receive(mqueue, option, rcv_size, msg_timeout, THREAD_ABORTSAFE);
+		kprintf("IOKITDIAG15: thread=%p past ipc_mqueue_receive, ith_state=%d\n",
+		    self, self->ith_state);
 		if ((option & MACH_RCV_TIMEOUT) && msg_timeout == 0) {
 			thread_poll_yield(self);
 		}
 		mr = mach_msg_receive_results(NULL);
+		kprintf("IOKITDIAG15: thread=%p past mach_msg_receive_results mr=0x%x\n", self, mr);
 		goto end;
 	}
 
 end:
+	kprintf("IOKITDIAG15: thread=%p mach_msg_overwrite_trap about to return mr=0x%x\n",
+	    current_thread(), mr);
 	ipc_port_thread_group_unblocked();
 	return mr;
 }

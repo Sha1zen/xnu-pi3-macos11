@@ -163,23 +163,6 @@ machine_switch_context(thread_t old,
 
 	machine_switch_context_kprintf("old= %x contination = %x new = %x\n", old, continuation, new);
 
-	/* TEMP DIAGNOSTIC 2026-08-29, session 5, launchd bug #6: attempted
-	 * (and REVERTED) -- printing thread->machine.upcb's SS64_SP around
-	 * the real Switch_context() call, even gated to non-kernel_task
-	 * threads only, caused a real, 100%-reproducible NEW crash in
-	 * load_init_program_at_path (launchd_boot_test70.log/71.log,
-	 * byte-identical modulo ASLR) that never happens without this
-	 * instrumentation -- kprintf() itself is evidently not safe to call
-	 * from inside machine_switch_context() this early in a brand-new
-	 * thread's life (PID 1's own very first thread, resumed_sp=0x0,
-	 * before its real user SP is set up by exec), independent of
-	 * whether the DATA being read is valid. Confirmed via a direct user
-	 * suggestion to test: does removing this one print make launchd
-	 * work again? -- see docs/backlog.md item d11 for the write-up.
-	 * Removed rather than fixed further; the data it would have
-	 * produced (a per-switch SP trace) isn't worth the risk of
-	 * introducing more instrumentation-induced crashes this deep in the
-	 * scheduler's own critical path. */
 	retval = Switch_context(old, continuation, new);
 	assert(retval != NULL);
 

@@ -1451,6 +1451,22 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 		exc |= EXC_PTRAUTH_BIT;
 	}
 #endif /* __has_feature(ptrauth_calls) */
+	/* TEMP DIAGNOSTIC 2026-08-29, launchd bug #6: real, unresolved EL0
+	 * fault about to become a real Mach exception (-> SIGSEGV once it
+	 * reaches launchd, per bsd/kern/kern_exit.c's own real
+	 * launchd_crashed_panic()). Userland+kernel-C-level kprintf
+	 * bisection (osfmk/ipc/mach_msg.c/ipc_mqueue.c, PureDarwin
+	 * launchd.c/runtime.c -- see iokit/docs/backlog.md item d11's full
+	 * trail) narrowed this down to the second (bsdthread_create()-
+	 * spawned) thread's very first continuation-based block inside
+	 * thread_block(), with every real setup step before it confirmed
+	 * correct and every candidate main-thread race ruled out -- this is
+	 * the actual real fault PC/address/thread this whole investigation
+	 * has been trying to see. */
+	kprintf("IOKITDIAG18: handle_user_abort thread=%p pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx esr=0x%x fault_addr=0x%llx exc=0x%x code0=0x%llx\n",
+	    thread, (uint64_t)get_saved_state_pc(state), (uint64_t)get_saved_state_sp(state),
+	    (uint64_t)get_saved_state_fp(state), (uint64_t)get_saved_state_lr(state),
+	    esr, (uint64_t)fault_addr, exc, (uint64_t)codes[0]);
 	exception_triage(exc, codes, numcodes);
 	__builtin_unreachable();
 }

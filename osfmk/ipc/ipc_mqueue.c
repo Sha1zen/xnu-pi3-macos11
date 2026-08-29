@@ -1069,6 +1069,18 @@ ipc_mqueue_receive(
 		 * bug); if they differ, the main thread's OWN, correctly
 		 * separate PCB had the wrong SP value written into it (a
 		 * save/restore path bug instead). */
+		/* TEMP DIAGNOSTIC 2026-08-29, session 5: briefly commented out
+		 * (launchd_boot_test73.log) to test whether this specific
+		 * kprintf call, right before the exact thread_block() that
+		 * leads into bug #6's crash, was itself contributing to the
+		 * corruption rather than just observing it -- same suspicion
+		 * that proved correct for the machine_switch_context print
+		 * (reverted, xnu-7195 commit 0483290d5). RULED OUT: confirmed
+		 * absent from that boot's own log (only this file's other,
+		 * differently-worded IOKITDIAG17 lines from earlier in this
+		 * same function appeared), yet bug #6 still crashed
+		 * identically (same fault pc/fp/fault_addr pattern). Restored
+		 * -- this print is safe and still useful. */
 		kprintf("IOKITDIAG17: thread=%p self=%p ith_continuation=%p about to call thread_block contextData=%p kernel_stack=0x%lx\n",
 		    self, current_thread(), self->ith_continuation, self->machine.contextData,
 		    (unsigned long)self->kernel_stack);

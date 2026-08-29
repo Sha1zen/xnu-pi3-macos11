@@ -1476,10 +1476,11 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	 * last WRITTEN by the second thread's own EL0 kernel entry,
 	 * directly explaining the main thread resuming with an SP_EL0
 	 * value that belongs to the second thread's own stack). */
-	kprintf("IOKITDIAG18: handle_user_abort thread=%p pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx esr=0x%x fault_addr=0x%llx exc=0x%x code0=0x%llx contextData=%p\n",
+	kprintf("IOKITDIAG18: handle_user_abort thread=%p pc=0x%llx sp=0x%llx fp=0x%llx lr=0x%llx esr=0x%x fault_addr=0x%llx exc=0x%x code0=0x%llx contextData=%p kernel_stack=0x%lx\n",
 	    thread, (uint64_t)get_saved_state_pc(state), (uint64_t)get_saved_state_sp(state),
 	    (uint64_t)get_saved_state_fp(state), (uint64_t)get_saved_state_lr(state),
-	    esr, (uint64_t)fault_addr, exc, (uint64_t)codes[0], thread->machine.contextData);
+	    esr, (uint64_t)fault_addr, exc, (uint64_t)codes[0], thread->machine.contextData,
+	    (unsigned long)thread->kernel_stack);
 	exception_triage(exc, codes, numcodes);
 	__builtin_unreachable();
 }

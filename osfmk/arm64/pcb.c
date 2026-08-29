@@ -163,30 +163,25 @@ machine_switch_context(thread_t old,
 
 	machine_switch_context_kprintf("old= %x contination = %x new = %x\n", old, continuation, new);
 
-	/* TEMP DIAGNOSTIC 2026-08-29, session 5, launchd bug #6: every
-	 * structural candidate checked so far (PCB alloc, kernel-stack
-	 * alloc, x19-x28/x21 save-restore, arm64_thread_exception_return's
-	 * fresh x21 recompute) is real and correct -- see
-	 * iokit/docs/backlog.md item d11. Narrowing to the actual switch:
-	 * print each thread's own saved-state SP (thread->machine.upcb's
-	 * SS64_SP, the exact field EL0_64_VECTOR/exception_return
-	 * save/restore) immediately around the real Switch_context() call
-	 * that never returns until THIS SAME C stack frame's own `old`
-	 * thread is later resumed -- i.e. the "before" print is `old`
-	 * yielding the CPU, the "after" print (once Switch_context finally
-	 * returns) is `old` being resumed, letting us see directly whether
-	 * `old`'s own saved SP changed while it was off-CPU with nothing
-	 * else that should be touching it. */
-	kprintf("IOKITDIAG20: machine_switch_context before Switch_context old=%p old_sp=0x%llx new=%p new_sp=0x%llx\n",
-	    old, (uint64_t)(old->machine.upcb ? get_saved_state_sp(old->machine.upcb) : 0),
-	    new, (uint64_t)(new->machine.upcb ? get_saved_state_sp(new->machine.upcb) : 0));
-
+	/* TEMP DIAGNOSTIC 2026-08-29, session 5, launchd bug #6: attempted
+	 * (and REVERTED) -- printing thread->machine.upcb's SS64_SP around
+	 * the real Switch_context() call, even gated to non-kernel_task
+	 * threads only, caused a real, 100%-reproducible NEW crash in
+	 * load_init_program_at_path (launchd_boot_test70.log/71.log,
+	 * byte-identical modulo ASLR) that never happens without this
+	 * instrumentation -- kprintf() itself is evidently not safe to call
+	 * from inside machine_switch_context() this early in a brand-new
+	 * thread's life (PID 1's own very first thread, resumed_sp=0x0,
+	 * before its real user SP is set up by exec), independent of
+	 * whether the DATA being read is valid. Confirmed via a direct user
+	 * suggestion to test: does removing this one print make launchd
+	 * work again? -- see docs/backlog.md item d11 for the write-up.
+	 * Removed rather than fixed further; the data it would have
+	 * produced (a per-switch SP trace) isn't worth the risk of
+	 * introducing more instrumentation-induced crashes this deep in the
+	 * scheduler's own critical path. */
 	retval = Switch_context(old, continuation, new);
 	assert(retval != NULL);
-
-	kprintf("IOKITDIAG21: machine_switch_context after Switch_context returned, resumed=%p (was old=%p) resumed_sp=0x%llx retval=%p\n",
-	    current_thread(), old,
-	    (uint64_t)(old->machine.upcb ? get_saved_state_sp(old->machine.upcb) : 0), retval);
 
 	return retval;
 }

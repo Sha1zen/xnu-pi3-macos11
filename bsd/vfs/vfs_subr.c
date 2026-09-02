@@ -1154,24 +1154,17 @@ vfs_mountroot(void)
 	for (vfsp = vfsconf; vfsp; vfsp = vfsp->vfc_next) {
 		if (vfsp->vfc_mountroot == NULL
 		    && !ISSET(vfsp->vfc_vfsflags, VFC_VFSCANMOUNTROOT)) {
-			printf("TEMP DIAGNOSTIC: vfs_mountroot skipping \"%s\" (no vfc_mountroot, no VFC_VFSCANMOUNTROOT)\n",
-			    vfsp->vfc_name);
 			continue;
 		}
 
 		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
 		mp->mnt_devvp = rootvp;
 
-		printf("TEMP DIAGNOSTIC: vfs_mountroot trying \"%s\" (vfc_mountroot=%p flags=%#x)\n",
-		    vfsp->vfc_name, (void *)vfsp->vfc_mountroot, vfsp->vfc_vfsflags);
-
 		if (vfsp->vfc_mountroot) {
 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);
 		} else {
 			error = VFS_MOUNT(mp, rootvp, 0, ctx);
 		}
-
-		printf("TEMP DIAGNOSTIC: vfs_mountroot \"%s\" result=%d\n", vfsp->vfc_name, error);
 
 		if (!error) {
 			if (bdevvp_rootvp != rootvp) {

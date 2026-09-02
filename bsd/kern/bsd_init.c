@@ -515,7 +515,6 @@ bsd_early_init(void)
 void
 bsd_init(void)
 {
-	printf("TEMP DIAGNOSTIC: bsd_init() entered\n");
 	struct uthread *ut;
 	unsigned int i;
 	struct vfs_context context;
@@ -1081,12 +1080,9 @@ bsd_init(void)
 #endif
 
 		bsd_init_kprintf("vfs_mountroot\n");
-		printf("TEMP DIAGNOSTIC: calling vfs_mountroot()\n");
 		if (0 == (err = vfs_mountroot())) {
-			printf("TEMP DIAGNOSTIC: vfs_mountroot() succeeded\n");
 			break;
 		}
-		printf("TEMP DIAGNOSTIC: vfs_mountroot() failed, err=%d\n", err);
 		rootdevice[0] = '\0';
 #if CONFIG_NETBOOT
 		if (netboot) {

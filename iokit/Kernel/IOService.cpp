@@ -1009,7 +1009,6 @@ IOService::registerService( IOOptionBits options )
 		}
 	}
 
-	IOLog("TEMP DIAGNOSTIC: registerService calling startMatching for \"%s\"\n", getName() ? getName() : "?");
 	startMatching( options );
 }
 
@@ -1020,7 +1019,6 @@ IOService::startMatching( IOOptionBits options )
 	UInt32      prevBusy = 0;
 	bool        needConfig;
 
-	IOLog("TEMP DIAGNOSTIC: startMatching entered for \"%s\" options=%#x\n", getName() ? getName() : "?", options);
 	bool        needWake = false;
 	bool        ok;
 	bool        sync;
@@ -4715,7 +4713,6 @@ _IOConfigThread::configThread( const char * name )
 		}
 		thread_t thread;
 		kern_return_t kts_kr = kernel_thread_start(&_IOConfigThread::main, inst, &thread);
-		IOLog("TEMP DIAGNOSTIC: _IOConfigThread::configThread kernel_thread_start kr=%d\n", kts_kr);
 		if (KERN_SUCCESS != kts_kr) {
 			continue;
 		}
@@ -5183,7 +5180,6 @@ _IOConfigThread::main(void * arg, wait_result_t result)
 	kern_return_t   kr;
 	thread_precedence_policy_data_t precedence = { -1 };
 
-	IOLog("TEMP DIAGNOSTIC: _IOConfigThread::main entered\n");
 	kr = thread_policy_set(current_thread(),
 	    THREAD_PRECEDENCE_POLICY,
 	    (thread_policy_t) &precedence,

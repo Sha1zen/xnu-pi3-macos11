@@ -96,6 +96,15 @@
 
 bool panic_on_exception_triage = false;
 
+/*
+ * -user_fault_debug: print a one-shot report (exception type/codes, PC,
+ * LR, SP, FAR, ESR, the vm_map regions containing PC and FAR, the
+ * argument registers, and an fp-chain backtrace) for each of the first
+ * 64 userland exceptions in the boot. Off by default. See the comment
+ * at the use site in exception_triage() for why this exists.
+ */
+bool user_fault_debug = false;
+
 unsigned long c_thr_exc_raise = 0;
 unsigned long c_thr_exc_raise_state = 0;
 unsigned long c_thr_exc_raise_state_id = 0;
@@ -149,6 +158,19 @@ exception_init(void)
 
 	if (PE_parse_boot_argn("-panic_on_exception_triage", &tmp, sizeof(tmp))) {
 		panic_on_exception_triage = true;
+	}
+
+	if (PE_parse_boot_argn("-user_fault_debug", &tmp, sizeof(tmp))) {
+		user_fault_debug = true;
+		/*
+		 * Announce it. Without this the facility is unfalsifiable from a
+		 * boot log: a run that reports nothing looks identical whether
+		 * the flag never reached the kernel or no userland exception
+		 * happened to occur -- exactly the "absence of output proves
+		 * nothing" trap this project has been burned by before.
+		 */
+		printf("user_fault_debug: enabled, will report the first 64 "
+		    "userland exceptions\n");
 	}
 }
 
@@ -532,6 +554,77 @@ out:
  *		KERN_SUCCESS if exception is handled by any of the handlers.
  */
 int debug4k_panic_on_exception = 0;
+
+#if defined(__arm64__) || defined(__arm__)
+/*
+ * -user_fault_debug helper: describe the vm_map entry containing a user
+ * address. See the use site in exception_triage() below.
+ *
+ * A raw PC is close to useless in a dynamically linked process -- it has
+ * to be resolved against whichever image dyld happened to map it into.
+ * The vm_map entry containing the PC starts at that image's own mach
+ * header (a Mach-O __TEXT segment is mapped from file offset 0), so
+ * vme_start is the image base and `addr - vme_start` is a static file
+ * offset that nm/otool can resolve on the host. The same lookup on the
+ * fault address says what the process thought it was touching and, on a
+ * miss, which mapped region it ran off the end of.
+ *
+ * Everything is copied out under the map lock and printed by the caller
+ * afterwards, never from in here: printf() on this platform goes to a
+ * 115200-baud serial console, and holding a task's vm_map lock across
+ * that transmission would stall every concurrent mmap/munmap in the
+ * faulting process.
+ */
+struct ufd_region {
+	bool     found;         /* addr lies inside a mapped entry */
+	bool     have_prev;     /* !found, and there is a real preceding entry */
+	uint64_t start;
+	uint64_t end;
+	uint64_t offset;
+	uint64_t next_start;    /* 0 if there is no following entry */
+	int      prot;
+	int      max_prot;
+};
+
+static void
+ufd_lookup_region(vm_map_t map, vm_map_offset_t addr, struct ufd_region *r)
+{
+	vm_map_entry_t e;
+
+	bzero(r, sizeof(*r));
+	if (map == VM_MAP_NULL) {
+		return;
+	}
+
+	vm_map_lock_read(map);
+	if (vm_map_lookup_entry(map, addr, &e)) {
+		r->found = true;
+	} else if (e != vm_map_to_entry(map)) {
+		/*
+		 * On a miss vm_map_lookup_entry hands back the PRECEDING
+		 * entry, which is the useful thing to report (it is the
+		 * region the access ran off the end of). It can also hand
+		 * back the map header itself when the address is below
+		 * everything -- that is not a vm_map_entry and its
+		 * protection fields do not exist, so it is skipped rather
+		 * than printed as garbage.
+		 */
+		r->have_prev = true;
+	}
+	if (r->found || r->have_prev) {
+		r->start = (uint64_t)e->vme_start;
+		r->end = (uint64_t)e->vme_end;
+		r->offset = (uint64_t)VME_OFFSET(e);
+		r->prot = e->protection;
+		r->max_prot = e->max_protection;
+		if (e->vme_next != vm_map_to_entry(map)) {
+			r->next_start = (uint64_t)e->vme_next->vme_start;
+		}
+	}
+	vm_map_unlock_read(map);
+}
+#endif /* __arm64__ || __arm__ */
+
 kern_return_t
 exception_triage(
 	exception_type_t        exception,
@@ -539,6 +632,170 @@ exception_triage(
 	mach_msg_type_number_t  codeCnt)
 {
 	thread_t thread = current_thread();
+
+	/*
+	 * user_fault_debug: opt-in console report of every userland
+	 * exception, enabled with the `-user_fault_debug` boot-arg. Off by
+	 * default; when off this costs one global load per exception.
+	 *
+	 * This project has no crash reporter, no ReportCrash, and no
+	 * debugger. The only thing a userland crash surfaces on the console
+	 * otherwise is task.c's "Failed to send exception
+	 * EXC_CORPSE_NOTIFY" line, which by then has already thrown the
+	 * original exception away (it re-triages a synthesized EXC_CRASH
+	 * with no PC, no fault address and no image name). That bare line
+	 * has now cost this project two separate multi-session
+	 * investigations -- DAR-217, where the real message only appeared
+	 * after running the daemon by hand from the root shell, and DAR-222,
+	 * where the crashing thread was not even the thread whose output
+	 * the printf-bisection was following. Hence keeping this rather
+	 * than deleting it after DAR-222.
+	 *
+	 * exception_triage() is the single choke point every arm64 user
+	 * exception really passes through (14 call sites across
+	 * osfmk/arm64/sleh.c and osfmk/arm/trap.c), and it runs before the
+	 * corpse path discards the original, so this is the earliest place
+	 * that can see the real type/codes/PC/FAR/ESR.
+	 *
+	 * Deliberately printed from the kernel rather than from userland:
+	 * the bug being chased is usually userland state corruption, so any
+	 * userland diagnostic channel shares the failure mode it is trying
+	 * to observe. Everything here comes from the kernel's own copy of
+	 * the user register file, saved by the exception vector before any
+	 * suspect userland state is touched. Output is capped so a
+	 * crash-looping launchd job cannot bury the console.
+	 */
+	if (user_fault_debug && thread != THREAD_NULL &&
+	    thread->task != kernel_task) {
+		static volatile uint32_t ufd_reports = 0;
+
+		if (ufd_reports < 64) {
+			ufd_reports++;
+#if defined(__arm64__) || defined(__arm__)
+			arm_saved_state_t *ufd_ss = find_user_regs(thread);
+
+			if (ufd_ss != NULL) {
+				printf("user_fault_debug: pid %d exc %d codes 0x%llx 0x%llx "
+				    "pc 0x%llx lr 0x%llx sp 0x%llx far 0x%llx esr 0x%x "
+				    "mh 0x%llx\n",
+				    task_pid(thread->task), exception,
+				    (uint64_t)(codeCnt > 0 ? code[0] : 0),
+				    (uint64_t)(codeCnt > 1 ? code[1] : 0),
+				    (uint64_t)get_saved_state_pc(ufd_ss),
+				    (uint64_t)get_saved_state_lr(ufd_ss),
+				    (uint64_t)get_saved_state_sp(ufd_ss),
+				    (uint64_t)get_saved_state_far(ufd_ss),
+				    get_saved_state_esr(ufd_ss),
+				    (uint64_t)thread->task->mach_header_vm_address);
+
+				vm_map_t ufd_map = thread->task->map;
+				vm_map_offset_t ufd_pc =
+				    (vm_map_offset_t)get_saved_state_pc(ufd_ss);
+				vm_map_offset_t ufd_far =
+				    (vm_map_offset_t)get_saved_state_far(ufd_ss);
+				struct ufd_region ufd_r;
+
+				ufd_lookup_region(ufd_map, ufd_pc, &ufd_r);
+				if (ufd_r.found) {
+					printf("user_fault_debug:   pc region [0x%llx,0x%llx) "
+					    "prot %d/%d off 0x%llx -> pc+0x%llx\n",
+					    ufd_r.start, ufd_r.end, ufd_r.prot,
+					    ufd_r.max_prot, ufd_r.offset,
+					    (uint64_t)ufd_pc - ufd_r.start);
+				} else {
+					printf("user_fault_debug:   pc 0x%llx unmapped\n",
+					    (uint64_t)ufd_pc);
+				}
+
+				ufd_lookup_region(ufd_map, ufd_far, &ufd_r);
+				if (ufd_r.found) {
+					printf("user_fault_debug:   far region [0x%llx,0x%llx) "
+					    "prot %d/%d off 0x%llx -> far+0x%llx\n",
+					    ufd_r.start, ufd_r.end, ufd_r.prot,
+					    ufd_r.max_prot, ufd_r.offset,
+					    (uint64_t)ufd_far - ufd_r.start);
+				} else if (ufd_r.have_prev) {
+					printf("user_fault_debug:   far 0x%llx unmapped; "
+					    "prev region [0x%llx,0x%llx) prot %d/%d, "
+					    "next starts 0x%llx\n",
+					    (uint64_t)ufd_far, ufd_r.start, ufd_r.end,
+					    ufd_r.prot, ufd_r.max_prot, ufd_r.next_start);
+				} else {
+					printf("user_fault_debug:   far 0x%llx unmapped, "
+					    "below every mapping\n", (uint64_t)ufd_far);
+				}
+
+				/*
+				 * Argument registers: for a memcpy/memset-shaped
+				 * fault x0/x1/x2 are dst/val/len, which says how
+				 * far past the end of the destination the write
+				 * was going and where it started.
+				 */
+				printf("user_fault_debug:   x0 0x%llx x1 0x%llx x2 0x%llx "
+				    "x3 0x%llx x4 0x%llx x5 0x%llx fp 0x%llx\n",
+				    (uint64_t)get_saved_state_reg(ufd_ss, 0),
+				    (uint64_t)get_saved_state_reg(ufd_ss, 1),
+				    (uint64_t)get_saved_state_reg(ufd_ss, 2),
+				    (uint64_t)get_saved_state_reg(ufd_ss, 3),
+				    (uint64_t)get_saved_state_reg(ufd_ss, 4),
+				    (uint64_t)get_saved_state_reg(ufd_ss, 5),
+				    (uint64_t)get_saved_state_fp(ufd_ss));
+
+				/*
+				 * Frame-pointer backtrace. The user register file
+				 * only carries one return address (LR); everything
+				 * above that lives in the user stack, so it has to
+				 * be copied in. Frames are collected first and
+				 * resolved to image bases afterwards, so the map
+				 * lock is never held across a copyin (which can
+				 * itself fault and block).
+				 */
+				uint64_t ufd_lrs[8];
+				unsigned ufd_nlr = 0;
+				uint64_t ufd_fp = (uint64_t)get_saved_state_fp(ufd_ss);
+
+				while (ufd_nlr < 8 && ufd_fp != 0 &&
+				    (ufd_fp & 0x7) == 0) {
+					uint64_t next_fp = 0, frame_lr = 0;
+
+					if (copyin_atomic64((user_addr_t)ufd_fp, &next_fp) != 0) {
+						break;
+					}
+					if (copyin_atomic64((user_addr_t)(ufd_fp + 8), &frame_lr) != 0) {
+						break;
+					}
+					ufd_lrs[ufd_nlr++] = frame_lr;
+					if (next_fp <= ufd_fp) {
+						break;
+					}
+					ufd_fp = next_fp;
+				}
+
+				for (unsigned i = 0; i < ufd_nlr; i++) {
+					ufd_lookup_region(ufd_map,
+					    (vm_map_offset_t)ufd_lrs[i], &ufd_r);
+					if (ufd_r.found && (ufd_r.prot & VM_PROT_EXECUTE)) {
+						printf("user_fault_debug:   bt[%u] 0x%llx = "
+						    "image 0x%llx + 0x%llx\n", i, ufd_lrs[i],
+						    ufd_r.start, ufd_lrs[i] - ufd_r.start);
+					} else {
+						printf("user_fault_debug:   bt[%u] 0x%llx = ?\n",
+						    i, ufd_lrs[i]);
+					}
+				}
+			} else
+#endif /* __arm64__ || __arm__ */
+			{
+				printf("user_fault_debug: pid %d exc %d codes 0x%llx 0x%llx "
+				    "(no user saved state)\n",
+				    task_pid(thread->task), exception,
+				    (uint64_t)(codeCnt > 0 ? code[0] : 0),
+				    (uint64_t)(codeCnt > 1 ? code[1] : 0));
+			}
+		}
+	}
+	/* end user_fault_debug */
+
 	if (VM_MAP_PAGE_SIZE(thread->task->map) < PAGE_SIZE) {
 		DEBUG4K_EXC("thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", thread, thread->task, thread->task->map, exception, code[0], code[1]);
 		if (debug4k_panic_on_exception) {

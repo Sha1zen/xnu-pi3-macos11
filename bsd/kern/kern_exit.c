@@ -773,6 +773,23 @@ abort_with_payload_internal(proc_t p,
 	exit_reason = build_userspace_exit_reason(reason_namespace, reason_code,
 	    payload, payload_size, reason_string, reason_flags | OS_REASON_FLAG_ABORT);
 
+	/*
+	 * DAR-167 diagnostic: this project has no crash reporter, so a
+	 * userspace abort_with_payload()'s real reason string (e.g. dyld's
+	 * own halt() message) is otherwise invisible whenever the aborting
+	 * process's stderr isn't wired to /dev/console (true for every
+	 * launchd MachServices daemon -- see osfmk/kern/exception.c's own
+	 * "Failed to send exception EXC_CORPSE_NOTIFY" comment for the same
+	 * class of gap on the Mach-exception side). Reuses that same
+	 * -user_fault_debug boot-arg rather than inventing a second one.
+	 */
+	extern bool user_fault_debug;
+	if (user_fault_debug && exit_reason != OS_REASON_NULL) {
+		char *desc = launchd_exit_reason_get_string_desc(exit_reason);
+		printf("user_fault_debug: pid %d abort_with_payload namespace %d code 0x%llx desc: %s\n",
+		    p->p_pid, reason_namespace, reason_code, desc ? desc : "(none)");
+	}
+
 	if (internal_flags & OS_REASON_IFLAG_USER_FAULT) {
 		mach_exception_code_t code = 0;
 

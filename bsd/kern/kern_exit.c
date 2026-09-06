@@ -889,6 +889,25 @@ int
 exit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, boolean_t perf_notify,
     int jetsam_flags, struct os_reason *exit_reason)
 {
+	/*
+	 * DAR-167 diagnostic: covers the plain exit()/_exit() path (no
+	 * os_reason), which abort_with_payload_internal()'s own existing
+	 * -user_fault_debug print (above in this file) does not -- that one
+	 * only fires for abort_with_payload()'s SIGABRT path. Real notifyd's
+	 * only exit(1) call site (bootstrap_check_in failure) uses buffered
+	 * fprintf(stderr, ...) immediately before exit(1); this project has
+	 * a real, previously-hit gap where buffered stdio does not reliably
+	 * flush on exit() (see docs/launchd-pid1-postmortem.md's DAR-23
+	 * regression), which would make that message silently vanish even
+	 * with a real StandardErrorPath file configured. This print is
+	 * kernel-side, so it sees the exit regardless of userland stdio
+	 * behavior.
+	 */
+	extern bool user_fault_debug;
+	if (user_fault_debug && exit_reason == OS_REASON_NULL) {
+		printf("user_fault_debug: pid %d plain exit rv=%d (0x%x)\n",
+		    p->p_pid, rv, rv);
+	}
 	thread_t self = current_thread();
 	struct task *task = p->task;
 	struct uthread *ut;

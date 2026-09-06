@@ -896,6 +896,23 @@ real_bsdthread_terminate(struct proc *p, user_addr_t stackaddr, size_t size,
 	if (pthread_kern->thread_will_park_or_terminate) {
 		pthread_kern->thread_will_park_or_terminate(th);
 	}
+	/* DAR-167 diagnostic: is this thread's task down to its last live
+	 * thread at the moment pthread_exit() calls bsdthread_terminate()?
+	 * (tools/userland_staging/libpthread_attr_compat.c's own real
+	 * pthread_exit() is a narrow, honest reimplementation that calls
+	 * this syscall directly with none of real Apple's pthread.c
+	 * _pthread_count/should_exit bookkeeping -- see that file's own
+	 * header comment -- so whether the process survives this call
+	 * depends entirely on real Mach task/thread-count semantics here,
+	 * not on any userland accounting.) */
+	{
+		extern bool user_fault_debug;
+		if (user_fault_debug) {
+			printf("user_fault_debug: pid %d bsdthread_terminate numacts=%d is_main=%d\n",
+			    proc_pid(current_proc()), get_task_numacts(current_task()),
+			    (pthread_kern->thread_get_tag(th) & THREAD_TAG_MAINTHREAD) != 0);
+		}
+	}
 	(void)thread_terminate(th);
 	if (sem != MACH_PORT_NULL) {
 		(void)pthread_kern->semaphore_signal_internal_trap(sem);

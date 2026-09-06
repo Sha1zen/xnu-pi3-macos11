@@ -460,6 +460,23 @@ thread_terminate_self(void)
 	 */
 	threadcnt = os_atomic_dec(&task->active_thread_count, relaxed);
 
+	/* DAR-167 diagnostic: the real, authoritative "last thread" counter
+	 * (task->active_thread_count), as opposed to get_task_numacts()'s
+	 * task->thread_count (a different field that can include
+	 * already-terminating-but-not-yet-unlinked threads, confirmed via
+	 * bsd_kern.c's own real body) -- checking whether notifyd's process
+	 * really does hit threadcnt==0 with only its main thread having ever
+	 * truly run, or whether a second (e.g. dispatch manager) thread was
+	 * genuinely active and this count is dropping unexpectedly. */
+	{
+		extern bool user_fault_debug;
+		if (user_fault_debug && task->bsd_info != NULL) {
+			printf("user_fault_debug: pid %d thread_terminate_self active_thread_count(after dec)=%d is_main=%d\n",
+			    proc_pid(task->bsd_info), threadcnt,
+			    (thread->thread_tag & THREAD_TAG_MAINTHREAD) != 0);
+		}
+	}
+
 	/*
 	 * If we are the last thread to terminate and the task is
 	 * associated with a BSD process, perform BSD process exit.

@@ -67,6 +67,7 @@ iokit/Drivers/BCM2837/BCM2837CPU.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Personalities.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837DWC2.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837USBEnum.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837USBHostController.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/SMSC9514USBTransport.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/SMSC9514Ethernet.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Mailbox.cpp		optional iokitcpp
@@ -168,3 +169,29 @@ iokit/Families/IOSystemManagement/IOWatchDogTimer.cpp	optional iokitcpp
 iokit/Kernel/IOPerfControl.cpp		optional iokitcpp
 
 iokit/bsddev/skywalk/IOSkywalkSupport.cpp		optional iokitcpp
+
+# --- USB (IOUSBFamily + AppleUSBCDCDriver), vendored by tools/vendor_usb_into_xnu.sh ---
+iokit/USB/BCM2837USBKernelGlue.cpp		optional iokitcpp
+iokit/USB/IOUSBBus.cpp		optional iokitcpp
+iokit/USB/IOUSBCommand.cpp		optional iokitcpp
+iokit/USB/IOUSBController_Errata.cpp		optional iokitcpp
+iokit/USB/IOUSBController_Pipes.cpp		optional iokitcpp
+iokit/USB/IOUSBController.cpp		optional iokitcpp
+iokit/USB/IOUSBControllerListElement.cpp		optional iokitcpp
+iokit/USB/IOUSBControllerUserClient.cpp		optional iokitcpp
+iokit/USB/IOUSBControllerV2.cpp		optional iokitcpp
+iokit/USB/IOUSBControllerV3.cpp		optional iokitcpp
+iokit/USB/IOUSBDevice.cpp		optional iokitcpp
+iokit/USB/IOUSBHubDevice.cpp		optional iokitcpp
+iokit/USB/IOUSBHubPolicyMaker.cpp		optional iokitcpp
+iokit/USB/IOUSBInterface.cpp		optional iokitcpp
+iokit/USB/IOUSBLog.cpp		optional iokitcpp
+iokit/USB/IOUSBNub.cpp		optional iokitcpp
+iokit/USB/IOUSBPipe.cpp		optional iokitcpp
+iokit/USB/IOUSBPipeV2.cpp		optional iokitcpp
+iokit/USB/IOUSBRootHubDevice.cpp		optional iokitcpp
+iokit/USB/IOUSBWorkLoop.cpp		optional iokitcpp
+iokit/Drivers/AppleUSBCDC/AppleUSBCDC.cpp		optional iokitcpp
+iokit/Drivers/AppleUSBCDC/AppleUSBCDCECMControl.cpp		optional iokitcpp
+iokit/Drivers/AppleUSBCDC/AppleUSBCDCECMData.cpp		optional iokitcpp
+iokit/Drivers/AppleUSBCDC/MsgTrace.c		optional iokitcpp

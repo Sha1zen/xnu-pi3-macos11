@@ -40,6 +40,15 @@ rsa_make_pub(rsa_pub_ctx *pub,
 	    || (mod_nbytes > RSA_MAX_KEY_BITSIZE / 8)) {
 		return -1; // Too big
 	}
+	/* DAR-108: same real, never-registered-kext condition
+	 * corecrypto_aes.c's aes_encrypt_key() already guards against - see
+	 * that function's own header comment for the full citation. Neither
+	 * RSA entry point gates the other (a pub_ctx could plausibly be
+	 * built another way and only verify called), so both need their own
+	 * guard. */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->ccrsa_make_pub_fn == NULL) {
+		return -1;
+	}
 	ccrsa_ctx_n(pub->key) = ccn_nof(RSA_MAX_KEY_BITSIZE);
 	return g_crypto_funcs->ccrsa_make_pub_fn(pub->key,
 	           exp_nbytes, exp,
@@ -52,6 +61,10 @@ rsa_verify_pkcs1v15(rsa_pub_ctx *pub, const uint8_t *oid,
     size_t sig_len, const uint8_t *sig,
     bool *valid)
 {
+	/* DAR-108: see rsa_make_pub()'s own comment above. */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->ccrsa_verify_pkcs1v15_fn == NULL) {
+		return -1;
+	}
 	return g_crypto_funcs->ccrsa_verify_pkcs1v15_fn(pub->key, oid,
 	           digest_len, digest,
 	           sig_len, sig, valid);

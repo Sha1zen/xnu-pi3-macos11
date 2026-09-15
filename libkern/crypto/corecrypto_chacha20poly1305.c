@@ -33,65 +33,117 @@
 static ccchacha20poly1305_fns_t
 fns(void)
 {
+	/* DAR-108: same real, never-registered-kext condition
+	 * corecrypto_aes.c's aes_encrypt_key() already guards against - see
+	 * that function's own header comment for the full citation. Every
+	 * one of the 9 public entry points below funnels through this one
+	 * function (and info(), which itself calls fns()), so a NULL check
+	 * here plus one at each public entry point (fns() alone dereffing
+	 * safely does not stop `fns()->init(...)` etc from still
+	 * dereferencing a NULL fns() result at the call site) covers all of
+	 * them. */
+	if (g_crypto_funcs == NULL) {
+		return NULL;
+	}
 	return g_crypto_funcs->ccchacha20poly1305_fns;
 }
 
 static const struct ccchacha20poly1305_info *
 info(void)
 {
-	return fns()->info();
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return NULL;
+	}
+	return f->info();
 }
 
 int
 chacha20poly1305_init(chacha20poly1305_ctx *ctx, const uint8_t *key)
 {
-	return fns()->init(info(), ctx, key);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->init(info(), ctx, key);
 }
 
 int
 chacha20poly1305_reset(chacha20poly1305_ctx *ctx)
 {
-	return fns()->reset(info(), ctx);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->reset(info(), ctx);
 }
 
 int
 chacha20poly1305_setnonce(chacha20poly1305_ctx *ctx, const uint8_t *nonce)
 {
-	return fns()->setnonce(info(), ctx, nonce);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->setnonce(info(), ctx, nonce);
 }
 
 int
 chacha20poly1305_incnonce(chacha20poly1305_ctx *ctx, uint8_t *nonce)
 {
-	return fns()->incnonce(info(), ctx, nonce);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->incnonce(info(), ctx, nonce);
 }
 
 int
 chacha20poly1305_aad(chacha20poly1305_ctx *ctx, size_t nbytes, const void *aad)
 {
-	return fns()->aad(info(), ctx, nbytes, aad);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->aad(info(), ctx, nbytes, aad);
 }
 
 int
 chacha20poly1305_encrypt(chacha20poly1305_ctx *ctx, size_t nbytes, const void *ptext, void *ctext)
 {
-	return fns()->encrypt(info(), ctx, nbytes, ptext, ctext);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->encrypt(info(), ctx, nbytes, ptext, ctext);
 }
 
 int
 chacha20poly1305_finalize(chacha20poly1305_ctx *ctx, uint8_t *tag)
 {
-	return fns()->finalize(info(), ctx, tag);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->finalize(info(), ctx, tag);
 }
 
 int
 chacha20poly1305_decrypt(chacha20poly1305_ctx *ctx, size_t nbytes, const void *ctext, void *ptext)
 {
-	return fns()->decrypt(info(), ctx, nbytes, ctext, ptext);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->decrypt(info(), ctx, nbytes, ctext, ptext);
 }
 
 int
 chacha20poly1305_verify(chacha20poly1305_ctx *ctx, const uint8_t *tag)
 {
-	return fns()->verify(info(), ctx, tag);
+	ccchacha20poly1305_fns_t f = fns();
+	if (f == NULL) {
+		return -1;
+	}
+	return f->verify(info(), ctx, tag);
 }

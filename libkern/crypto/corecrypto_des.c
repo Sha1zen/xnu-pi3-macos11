@@ -37,6 +37,16 @@
 int
 des_ecb_key_sched(des_cblock *key, des_ecb_key_schedule *ks)
 {
+	/* DAR-108: same real, never-registered-kext condition
+	 * corecrypto_aes.c's aes_encrypt_key() already guards against - see
+	 * that function's own header comment for the full citation. Guarded
+	 * here at key-schedule time (des_ecb_encrypt() below has no
+	 * independent context without a successful key_sched call first). */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->ccdes_ecb_encrypt == NULL ||
+	    g_crypto_funcs->ccdes_ecb_decrypt == NULL) {
+		return -1;
+	}
+
 	const struct ccmode_ecb *enc = g_crypto_funcs->ccdes_ecb_encrypt;
 	const struct ccmode_ecb *dec = g_crypto_funcs->ccdes_ecb_decrypt;
 
@@ -68,6 +78,12 @@ des_ecb_encrypt(des_cblock *in, des_cblock *out, des_ecb_key_schedule *ks, int e
 int
 des3_ecb_key_sched(des_cblock *key, des3_ecb_key_schedule *ks)
 {
+	/* DAR-108: same guard as des_ecb_key_sched() above. */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->cctdes_ecb_encrypt == NULL ||
+	    g_crypto_funcs->cctdes_ecb_decrypt == NULL) {
+		return -1;
+	}
+
 	const struct ccmode_ecb *enc = g_crypto_funcs->cctdes_ecb_encrypt;
 	const struct ccmode_ecb *dec = g_crypto_funcs->cctdes_ecb_decrypt;
 
@@ -99,5 +115,13 @@ des3_ecb_encrypt(des_cblock *in, des_cblock *out, des3_ecb_key_schedule *ks, int
 int
 des_is_weak_key(des_cblock *key)
 {
+	/* DAR-108: unlike the two key_sched functions above, nothing gates
+	 * this entry point - callers can reach it independently. Fail
+	 * closed (report weak/rejected) rather than crash: a caller that
+	 * can't verify key strength should not treat that as "key is
+	 * fine." */
+	if (g_crypto_funcs == NULL || g_crypto_funcs->ccdes_key_is_weak_fn == NULL) {
+		return 1;
+	}
 	return g_crypto_funcs->ccdes_key_is_weak_fn(key, CCDES_KEY_SIZE);
 }

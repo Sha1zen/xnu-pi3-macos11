@@ -164,9 +164,35 @@ extern kern_return_t mach_vm_behavior_set(vm_map_t map, mach_vm_offset_t start,
 
 /*
  * Real struct definitions from third_party/libpthread/kern/kern_internal.h
- * (lines 66-92 as of libpthread-454.80.2) - copied verbatim, this project
- * has no kext-loading boundary so there's no shared private header both
- * sides would normally include from the same SDK snapshot.
+ * (lines 66-92 as of libpthread-454.80.2) - this project has no
+ * kext-loading boundary so there's no shared private header both sides
+ * would normally include from the same SDK snapshot.
+ *
+ * DAR-280: this was NOT actually verbatim - the real struct (kern_internal.h
+ * line 89) is `__attribute__((packed))`, and this copy dropped that
+ * attribute. On arm64/LP64 that's not cosmetic: without it, the compiler
+ * inserts 4 bytes of natural-alignment padding before the 8-byte
+ * `stack_addr_hint` (which starts right after three uint32_t fields, at an
+ * offset not itself 8-aligned), shifting `stack_addr_hint`,
+ * `mutex_default_policy`, and `joinable_offset_bits` 4 bytes later than
+ * where userland's real (packed) struct puts them - real_bsdthread_register()
+ * below's `copyout(&data, pthread_init_data, pthread_init_sz)` then wrote
+ * `data.mutex_default_policy` at the WRONG byte offset relative to what
+ * libpthread's real _pthread_bsdthread_init() reads it from (userland ended
+ * up reading the upper 32 bits of its own `stack_addr_hint` as
+ * `mutex_default_policy` instead). Root-caused by symbolicating a real
+ * SIGSEGV (pthread_cond_wait, far 0x2f, inside pthread_mutex_s's
+ * psynch.m_seq/m_mis fields) back to "the ulock opt-in below silently never
+ * reached userland" - setting `_PTHREAD_REG_DEFAULT_USE_ULOCK` had zero
+ * effect until this was fixed, confirmed by re-testing after this same
+ * struct fix and seeing the crash disappear where the flag alone did not
+ * (see real_bsdthread_register()'s own DAR-280 comment for that fix).
+ * `sizeof()` used below (for pthread_init_sz's MIN(), and version checks)
+ * is what actually depends on this struct matching userland byte-for-byte;
+ * a size mismatch either truncates the copyout/copyin or, as here, silently
+ * shifts field offsets past the point of divergence with no compiler
+ * warning on either side, since each side independently sees a
+ * self-consistent (but different) layout.
  */
 struct _pthread_registration_data {
 	uint64_t version;
@@ -181,7 +207,7 @@ struct _pthread_registration_data {
 #define _PTHREAD_REG_DEFAULT_USE_ADAPTIVE_SPIN 0x200
 	uint32_t mutex_default_policy;
 	uint32_t joinable_offset_bits;
-};
+} __attribute__((packed));
 
 /* real macros from kern_support.c (libpthread-454.80.2) lines 120-133 */
 #define C_WORKQ_STK_ALIGN       16
@@ -627,7 +653,32 @@ real_bsdthread_register(struct proc *p,
 		}
 
 		data.stack_addr_hint = stackaddr;
-		data.mutex_default_policy = 0;
+		// DAR-280: this used to be 0 (no bits set), which tells
+		// libpthread's real _pthread_mutex_init() that ulock-based mutex/
+		// condvar sync is NOT available, so __pthread_mutex_use_ulock stays
+		// false and _pthread_mutex_uses_ulock()/every pthread_cond_wait()
+		// falls through to the PSYNCH path - __psynch_cvwait/cvsignal/
+		// cvbroad/cvclrprepost (and psynch_mutexwait/psynch_mutexdrop for
+		// a genuinely CONTENDED mutex) are all wired to stub_psynch_error()
+		// in bsd_pthread_stub.c, unconditional ENOTSUP, never implemented.
+		// libpthread's real pthread_cond.c doesn't expect that return from
+		// the kernel and mishandles it, reading through what ends up being
+		// a NULL/garbage pointer - the real cause of DAR-280's SIGSEGV
+		// (far 0x26) inside _pthread_cond_wait. An UNCONTENDED
+		// pthread_mutex_lock/unlock never reaches psynch_mutexwait at all
+		// (pure userspace CAS fast path), which is why plain mutex use has
+		// looked fine in every test so far - contended mutexes would hit
+		// the identical stubbed-syscall problem, just not exercised yet.
+		// sys_ulock.c's ulock_wait()/ulock_wake()/ulock_wait2() ARE real,
+		// full implementations (not stubs) and already QEMU-verified for
+		// the mutex fast path - setting USE_ULOCK here is the real,
+		// Apple-defined way (this exact struct/bit, kern_internal.h in
+		// apple-oss-distributions libpthread) to route mutex AND condvar
+		// sync through that already-working path instead of the
+		// unimplemented psynch_* syscalls. Not setting
+		// USE_ADAPTIVE_SPIN alongside it - that bit is a separate,
+		// unverified optimization, not needed to fix this bug.
+		data.mutex_default_policy = _PTHREAD_REG_DEFAULT_USE_ULOCK;
 
 		kr = copyout(&data, pthread_init_data, pthread_init_sz);
 		if (kr != KERN_SUCCESS) {

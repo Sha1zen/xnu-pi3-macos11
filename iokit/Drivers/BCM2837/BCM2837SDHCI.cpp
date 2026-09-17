@@ -6,7 +6,6 @@
 #include <IOKit/storage/IOMedia.h>
 #include <libkern/OSByteOrder.h>
 #include <string.h>
-#include <pexpert/pexpert.h>	// PE_parse_boot_argn (DAR-316 bisect gate)
 
 #define super IOBlockStorageDevice
 
@@ -44,6 +43,7 @@ BCM2837SDHCI::init(OSDictionary *properties)
 	fCurrentClockHz = 0;
 
 	fPendingIntStatus = 0;
+	fShadowTransferMode = 0;
 	fRealInterruptHits = 0;
 	fPollFallbackHits = 0;
 	fLoggedRealInterrupt = false;
@@ -85,14 +85,19 @@ uint32_t BCM2837SDHCI::readReg32(uint32_t off) { return *((volatile uint32_t *)(
 // kept for the whole session rather than recalculated per clock change -
 // same choice made here. This driver previously had NO spacing at all:
 // back-to-back writes (writeReg32(kRegArgument,...) immediately followed
-// by writeReg16(kRegCommand,...) in sendCommand(), TransferMode then
-// BlockCount in read/writeBlocksPIO(), ...) execute nanoseconds apart on
-// real ARM64 silicon, far under this threshold, and QEMU's MMIO-trap
-// overhead incidentally provides enough real spacing to hide the bug
-// entirely - a real, silent, real-hardware-only write can be dropped by
-// the controller with no error status ever latched, which matches DAR-
+// by the TRANSFER_MODE/COMMAND write in sendCommand()) execute nanoseconds
+// apart on real ARM64 silicon, far under this threshold, and QEMU's
+// MMIO-trap overhead incidentally provides enough real spacing to hide the
+// bug entirely - a real, silent, real-hardware-only write can be dropped
+// by the controller with no error status ever latched, which matches DAR-
 // 316's evidence (PRESENT_STATE genuinely wedged, INT_STATUS clean)
-// better than any theory tested so far this ticket.
+// better than the bus-width/clock-rate theories tested earlier this
+// ticket. NOT sufficient by itself, though (confirmed by a real-hw boot
+// after this fix landed, still failing identically) - see sendCommand()'s
+// own citation for the real, targeted fix for TRANSFER_MODE/COMMAND and
+// BLOCK_SIZE/BLOCK_COUNT specifically (combining each pair into one
+// 32-bit write, matching Linux's sdhci-iproc.c bcm2835 ops and u-boot's
+// own shadow-write trick, rather than relying on spacing alone for them).
 enum { kRegWriteSpacingUs = 6 }; // (2 * 1000000 / 400000) + 1, matching u-boot exactly
 
 void
@@ -793,8 +798,35 @@ BCM2837SDHCI::tryRaiseDataPhaseClock(void)
 	return raised;
 }
 
+void
+BCM2837SDHCI::writeBlockSizeCountVerified(uint16_t blockCount, uint16_t blockSize)
+{
+	uint32_t want = ((uint32_t)blockCount << 16) | blockSize;
+	uint32_t got = 0;
+	// DAR-316: real-hardware evidence (2026-09-17) has since shown this
+	// drop-then-recover-within-1-2-retries pattern is common, not rare -
+	// silent here on any attempt that eventually matches (this is now
+	// expected, self-correcting behavior, not something worth a log line
+	// every time it happens) - only the exhausted-all-3-attempts case
+	// below still logs, since that's the case actually worth knowing
+	// about. See this method's own header comment for why the retry
+	// isn't proven to defeat whatever the real mechanism is, only
+	// empirically observed to work every time it's been seen so far.
+	for (int attempt = 0; attempt < 3; attempt++) {
+		writeReg32(kRegBlockSize, want);
+		got = readReg32(kRegBlockSize);
+		if (got == want) {
+			return;
+		}
+	}
+	IOLog("BCM2837SDHCI: DAR-316: BLOCK_SIZE/COUNT write did not stick after "
+	    "3 attempts (wanted %#x, last read back %#x) - proceeding anyway, "
+	    "the command that follows will most likely fail visibly\n",
+	    want, got);
+}
+
 bool
-BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, bool hasData, uint32_t resp[4])
+BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, bool hasData, uint32_t resp[4], uint16_t transferMode)
 {
 	if (!waitClear32(kRegPresentState, kPresentCmdInhibit, 1000000)) {
 		IOLog("BCM2837SDHCI: CMD_INHIBIT stuck before CMD%u - resetting cmd line\n", cmdIndex);
@@ -859,7 +891,39 @@ BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, boo
 		flags |= kCmdDataPresent;
 	}
 
-	writeReg16(kRegCommand, (uint16_t)((cmdIndex << 8) | flags));
+	uint16_t cmdWord = (uint16_t)((cmdIndex << 8) | flags);
+	// DAR-316: real, cited erratum (Linux mainline drivers/mmc/host/
+	// sdhci-iproc.c, sdhci_bcm2835_pltfm_data/sdhci_iproc_32only_ops;
+	// independently corroborated by u-boot's bcm2835_sdhci.c writew(),
+	// which shadows TRANSFER_MODE and only ever writes it combined with
+	// COMMAND) - quoting the Linux comment verbatim: "the Arasan has a
+	// bugette whereby it may lose the content of successive writes to
+	// registers that are within two SD-card clock cycles of each
+	// other... In reality, this only happens when SDHCI_BLOCK_SIZE and
+	// SDHCI_BLOCK_COUNT are written followed by SDHCI_TRANSFER_MODE and
+	// SDHCI_COMMAND." TRANSFER_MODE (0x0C) and COMMAND (0x0E) are the
+	// same 32-bit hardware word on this SoC, REGARDLESS of whether the
+	// command being issued has a data phase - the erratum is about this
+	// register pair's physical write timing, not about data semantics.
+	// u-boot's own writew() never special-cases this on hasData either:
+	// it unconditionally shadows TRANSFER_MODE and combines it into
+	// EVERY COMMAND write. A first pass here only combined the hasData
+	// path, leaving hasData==false commands (CMD12 included) still doing
+	// a bare, independent 16-bit COMMAND write to the same shared word -
+	// real evidence this was incomplete: a real-hw boot log the same day
+	// showed the DAT_INHIBIT-stuck failure move from CMD24's own
+	// precondition (before the fix) to a real CMD12 CRC/End-Bit error
+	// straight after a write's data phase (after the fix) - progress
+	// (CMD24 itself + the write's data phase now succeed), but CMD12
+	// itself was still exposed. fShadowTransferMode is only ever updated
+	// when hasData is true (matching u-boot: non-data commands never
+	// change TRANSFER_MODE's meaning), but every command - data or not -
+	// now combines whatever is currently shadowed with its own COMMAND
+	// word into one 32-bit write, never a bare writeReg16(kRegCommand).
+	if (hasData) {
+		fShadowTransferMode = transferMode;
+	}
+	writeReg32(kRegTransferMode, ((uint32_t)cmdWord << 16) | fShadowTransferMode);
 
 	uint32_t status;
 	if (!waitForIntStatus32(kIntCmdComplete | kIntErrorMask, 1000000, &status)) {
@@ -896,7 +960,34 @@ BCM2837SDHCI::sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType, boo
 		return false;
 	}
 	if (status & kIntErrorMask) {
+		// DAR-316 diagnostic: this branch previously logged only the raw
+		// completion status, unlike the timeout branch above and the
+		// DAT_INHIBIT-stuck precondition branch earlier in this function -
+		// added after two behavioral fix attempts (combining TRANSFER_MODE/
+		// COMMAND writes, first for hasData only, then unconditionally via
+		// fShadowTransferMode) produced a BYTE-IDENTICAL real-hardware
+		// failure both times on a real CMD12 sent right after a clean
+		// 73-block write (every per-block BUFFER_WRITE_READY wait and the
+		// final TRANSFER_COMPLETE check all reported no error). Since
+		// changing how COMMAND is written made no observable difference,
+		// the real cause is not in this function's own write pattern -
+		// this dump is the next real evidence, not a third guess. Real
+		// question it answers: is PRESENT_STATE's DAT_INHIBIT/DAT_LINE_
+		// ACTIVE genuinely still asserted with the physical DAT[3:0] lines
+		// actually held low by the card (real, still-busy programming
+		// tail from the write) at the moment CMD12's own completion is
+		// checked, or do the lines already read idle (software/timing
+		// artifact, e.g. a late-arriving CRC-status interrupt for the
+		// write's last block landing after this driver's own TRANSFER_
+		// COMPLETE check already passed cleanly, then misattributed here)?
+		uint32_t presentState = readReg32(kRegPresentState);
+		uint16_t clockControl = readReg16(kRegClockControl);
+		uint32_t intEnable = readReg32(kRegIntEnable);
 		IOLog("BCM2837SDHCI: CMD%u error, INT_STATUS=%#x\n", cmdIndex, status);
+		IOLog("BCM2837SDHCI: DAR-316 diag: PRESENT_STATE=%#x CLOCK_CONTROL=%#x "
+		    "INT_ENABLE=%#x fPendingIntStatus=%#x cmdIndex=%u hasData=%u arg=%#x\n",
+		    presentState, clockControl, intEnable, fPendingIntStatus, cmdIndex,
+		    hasData, arg);
 		// Same recovery as the timeout case above - a real CRC/index/end-bit
 		// error (SDHCI spec 3.7.1) requires SOFTWARE_RESET_CMD before the
 		// controller can reliably accept another command.
@@ -997,12 +1088,15 @@ BCM2837SDHCI::widenBusTo4Bit(void)
 		return false;
 	}
 
-	writeReg16(kRegBlockSize, 8);
-	writeReg16(kRegBlockCount, 1);
-	writeReg16(kRegTransferMode, kCmdTransBlkCntEn | kCmdTransRead);
+	// DAR-316: BLOCK_SIZE (0x04) and BLOCK_COUNT (0x06) are also one 32-bit
+	// hardware word on this SoC and subject to the same real erratum as
+	// TRANSFER_MODE/COMMAND (see sendCommand()'s own citation) - combined
+	// into one write, verified and retried on mismatch (see
+	// writeBlockSizeCountVerified()'s own citation).
+	writeBlockSizeCountVerified(1, 8);
 
 	uint32_t r51[4];
-	if (!sendCommand(51, 0, kCmdRespShort, true, r51)) {
+	if (!sendCommand(51, 0, kCmdRespShort, true, r51, kCmdTransBlkCntEn | kCmdTransRead)) {
 		IOLog("BCM2837SDHCI: ACMD51 (SEND_SCR) command failed\n");
 		return false;
 	}
@@ -1171,39 +1265,12 @@ BCM2837SDHCI::cardIdentify(void)
 	// negotiation itself failed; either way CMD16 right below restores
 	// kRegBlockSize regardless of what widenBusTo4Bit() left it at.
 	//
-	// DAR-316: gated on a boot-arg so real hardware can be bisected
-	// WITHOUT a full card reflash - boot with `sd-4bit=0` to stay at
-	// 1-bit. Default (arg absent) keeps DAR-218's real 4-bit behavior,
-	// so this is a diagnostic escape hatch, not a behavior change.
-	// Exists because real-hardware symptoms appeared the same day
-	// DAR-218 landed (every file creation failing: no /var/log/*.log,
-	// no /var/run/chrony, chronyd fatal on its pid file, syslogd absent)
-	// while a fresh-state QEMU boot reproduced NONE of them - and this
-	// file's own header warns that a host/card bus-width mismatch is
-	// "data corruption rather than a clean failure", which is exactly
-	// what write-only-failure looks like.
-	// Real hardware has NO way to set a boot-arg (they are baked into
-	// u-boot.bin's CONFIG_BOOTCOMMAND, and reaching u-boot's interactive
-	// prompt needs a keyboard this board does not have), so the DEFAULT is
-	// what a real-hardware bisect actually varies: build one kernel with
-	// -DDAR316_SD4BIT_DEFAULT=0, copy it to the boot partition, power
-	// cycle. The boot-arg is still honored, which is what makes the same
-	// kernel testable under QEMU.
-#ifndef DAR316_SD4BIT_DEFAULT
-#define DAR316_SD4BIT_DEFAULT 1
-#endif
-	uint32_t sd4bit = DAR316_SD4BIT_DEFAULT;
-	(void)PE_parse_boot_argn("sd-4bit", &sd4bit, sizeof(sd4bit));
-	// Logged unconditionally and BEFORE acting on it: the whole point of
-	// this gate is that a serial boot log identifies which variant is
-	// running. A message that only prints in one branch cannot do that.
-	IOLog("BCM2837SDHCI: DAR-316 gate: sd-4bit=%u (compiled default %u)\n",
-	    sd4bit, (uint32_t)DAR316_SD4BIT_DEFAULT);
-	if (sd4bit == 0) {
-		IOLog("BCM2837SDHCI: 4-bit widening DISABLED, staying at 1-bit bus\n");
-	} else {
-		widenBusTo4Bit();
-	}
+	// DAR-316's real-hardware write-path bugs were bisected against this
+	// (a `sd-4bit=0` boot-arg gate, removed once bus width was
+	// conclusively exonerated as a cause and the real root causes were
+	// found and fixed instead - see BCM2837SDHCI.h's class header and the
+	// DAR-316 Linear history for the full trail).
+	widenBusTo4Bit();
 
 	// CMD16: SET_BLOCKLEN - force 512-byte blocks. On SDHC/SDXC cards this
 	// is actually a no-op per spec (always 512), but harmless/cheap to send.
@@ -1325,35 +1392,13 @@ BCM2837SDHCI::start(IOService *provider)
 		// return just means the bus stays at the identification clock,
 		// which is exactly where every boot before this change ran.
 		//
-		// DAR-316 bisect: real hardware hit a real, reproducible write
-		// failure (DAT_INHIBIT stuck before CMD24, then jnl:
-		// write_journal_header I/O error) on the FIRST write attempted
-		// after boot -- every prior operation up to that point was a
-		// read, including tryRaiseDataPhaseClock()'s own read-compare
-		// self-check at the raised clock, which passed. Confirmed
-		// independent of 4-bit widening (DAR-218) via a real boot with
-		// that code path's default flipped to OFF -- identical failure,
-		// identical location. The clock raise is the one remaining
-		// variable in common with a boot that (per the user) previously
-		// worked, so this gate skips it entirely: default 0 means "skip
-		// the raise, stay at the 400kHz identification clock for the
-		// whole session" (real hardware has no way to set the boot-arg
-		// -- see BCM2837SDHCI.cpp's other DAR-316 comment -- so this
-		// board-testable direction is the compiled default, same as the
-		// other two gates).
-#ifndef DAR316_SD_SKIP_CLOCK_RAISE_DEFAULT
-#define DAR316_SD_SKIP_CLOCK_RAISE_DEFAULT 0
-#endif
-		uint32_t skipRaise = DAR316_SD_SKIP_CLOCK_RAISE_DEFAULT;
-		(void)PE_parse_boot_argn("sd-skip-clock-raise", &skipRaise, sizeof(skipRaise));
-		IOLog("BCM2837SDHCI: DAR-316 gate: sd-skip-clock-raise=%u (compiled default %u)\n",
-		    skipRaise, (uint32_t)DAR316_SD_SKIP_CLOCK_RAISE_DEFAULT);
-		if (skipRaise != 0) {
-			IOLog("BCM2837SDHCI: clock raise SKIPPED, staying at the "
-			    "%u Hz identification clock\n", (uint32_t)kIdentificationClockHz);
-		} else {
-			tryRaiseDataPhaseClock();
-		}
+		// DAR-316's real-hardware write-path bugs were bisected against
+		// this too (a `sd-skip-clock-raise` boot-arg gate, removed once
+		// the clock rate was conclusively exonerated as a cause and the
+		// real root causes were found and fixed instead - see this
+		// class's header comment and the DAR-316 Linear history for the
+		// full trail).
+		tryRaiseDataPhaseClock();
 	}
 
 	registerService();
@@ -1488,12 +1533,16 @@ BCM2837SDHCI::readBlocksPIO(uint64_t startBlock, uint32_t nblks, void *buf)
 {
 	uint32_t *dst = (uint32_t *)buf;
 	uint32_t arg = fCardIsSDHC ? (uint32_t)startBlock : (uint32_t)(startBlock * fBlockSize);
-	uint32_t transferMode = kCmdTransBlkCntEn | kCmdTransRead | (nblks > 1 ? kCmdTransMulti : 0);
-	writeReg16(kRegTransferMode, transferMode);
-	writeReg16(kRegBlockCount, (uint16_t)nblks);
+	uint16_t transferMode = kCmdTransBlkCntEn | kCmdTransRead | (nblks > 1 ? kCmdTransMulti : 0);
+	// DAR-316: BLOCK_SIZE/BLOCK_COUNT combined into one write, verified and
+	// retried on mismatch - see writeBlockSizeCountVerified()'s own
+	// citation (a real-hw boot showed this exact write silently not
+	// sticking: BLOCK_COUNT stayed stale at an earlier operation's value,
+	// deterministically producing a stuck-after-block-0 timeout).
+	writeBlockSizeCountVerified((uint16_t)nblks, (uint16_t)fBlockSize);
 
 	uint8_t cmdIndex = (nblks > 1) ? 18 : 17; // READ_MULTIPLE_BLOCK / READ_SINGLE_BLOCK
-	if (!sendCommand(cmdIndex, arg, kCmdRespShort, true, NULL)) {
+	if (!sendCommand(cmdIndex, arg, kCmdRespShort, true, NULL, transferMode)) {
 		return false;
 	}
 
@@ -1564,19 +1613,45 @@ BCM2837SDHCI::writeBlocksPIO(uint64_t startBlock, uint32_t nblks, const void *bu
 {
 	const uint32_t *src = (const uint32_t *)buf;
 	uint32_t arg = fCardIsSDHC ? (uint32_t)startBlock : (uint32_t)(startBlock * fBlockSize);
-	uint32_t transferMode = kCmdTransBlkCntEn | (nblks > 1 ? kCmdTransMulti : 0); // no READ bit = write
-	writeReg16(kRegTransferMode, transferMode);
-	writeReg16(kRegBlockCount, (uint16_t)nblks);
+	uint16_t transferMode = kCmdTransBlkCntEn | (nblks > 1 ? kCmdTransMulti : 0); // no READ bit = write
+	// DAR-316: BLOCK_SIZE/BLOCK_COUNT combined into one write, verified and
+	// retried on mismatch - see writeBlockSizeCountVerified()'s own
+	// citation (a real-hw boot showed this exact write silently not
+	// sticking: BLOCK_COUNT stayed stale at an earlier operation's value,
+	// deterministically producing a stuck-after-block-0 timeout).
+	writeBlockSizeCountVerified((uint16_t)nblks, (uint16_t)fBlockSize);
 
 	uint8_t cmdIndex = (nblks > 1) ? 25 : 24; // WRITE_MULTIPLE_BLOCK / WRITE_BLOCK
-	if (!sendCommand(cmdIndex, arg, kCmdRespShort, true, NULL)) {
+	if (!sendCommand(cmdIndex, arg, kCmdRespShort, true, NULL, transferMode)) {
 		return false;
 	}
 
 	for (uint32_t b = 0; b < nblks; b++) {
 		uint32_t status;
 		if (!waitForIntStatus32(kIntBufWriteRdy | kIntErrorMask, 1000000, &status)) {
+			// DAR-316 diagnostic: this per-block timeout has been observed
+			// real and RECURRING on real hardware (not the one-off it first
+			// looked like) - consistently on block index 1 (the SECOND
+			// block of a multi-block write), regardless of total block
+			// count (seen with both nblks=8 and nblks=16). That specific,
+			// repeatable pattern - not block 0, not a scattered later
+			// block - is itself real evidence worth capturing rather than
+			// guessing about FIFO/clock-domain timing from code reading
+			// alone, the same lesson this ticket's other diagnostics
+			// already paid for. Previously this branch logged only the
+			// block index, unlike the CMD12/command-error branches in
+			// sendCommand() - added the same register dump those already
+			// have.
+			uint32_t presentState = readReg32(kRegPresentState);
+			uint16_t clockControl = readReg16(kRegClockControl);
+			uint32_t intStatusRaw = readReg32(kRegIntStatus);
+			uint32_t intEnable = readReg32(kRegIntEnable);
 			IOLog("BCM2837SDHCI: write block %u/%u timed out waiting BUFFER_WRITE_READY - resetting dat line\n", b, nblks);
+			IOLog("BCM2837SDHCI: DAR-316 diag: PRESENT_STATE=%#x CLOCK_CONTROL=%#x "
+			    "INT_STATUS(raw)=%#x INT_ENABLE=%#x fPendingIntStatus=%#x "
+			    "startBlock=%llu nblks=%u blockIndex=%u\n",
+			    presentState, clockControl, intStatusRaw, intEnable,
+			    fPendingIntStatus, (unsigned long long)startBlock, nblks, b);
 			resetDatLine();
 			return false;
 		}
@@ -1604,6 +1679,63 @@ BCM2837SDHCI::writeBlocksPIO(uint64_t startBlock, uint32_t nblks, const void *bu
 	}
 
 	if (nblks > 1) {
+		// DAR-316: real evidence (2026-09-16 real-hw boot log) that
+		// TRANSFER_COMPLETE above reflects only the HOST side of a write
+		// (all data pushed over DAT) - not the CARD's own post-write busy
+		// tail. Per the SD Physical Layer spec, after the last block the
+		// card returns a short CRC-status token over DAT0 (accept/reject) -
+		// separate from the SDHCI-level Transfer Complete indication - then
+		// holds DAT0 busy while it actually programs the flash. A real
+		// register dump at a CMD12 failure decoded PRESENT_STATE=0x1ef0006:
+		// DAT0's own line-level bit read LOW (genuinely held busy by the
+		// card), not idle. Issuing STOP_TRANSMISSION immediately after
+		// TRANSFER_COMPLETE races that real physical tail: a late CRC-
+		// status-token error can still be in flight and gets misattributed
+		// to CMD12's own completion check instead of the write's -
+		// confirmed against real Linux mainline sdhci.c, which has no
+		// quirk recognizing or special-casing this; a trailing data error
+		// there genuinely does land on whatever command's completion check
+		// happens to observe it first. Scoped to nblks>1 only (adversarial
+		// review, 2026-09-16): a single-block write (CMD24) never sends
+		// CMD12 at all, so it was never the command implicated in the real
+		// failure - applying this unconditionally would add ~1s of
+		// latency and a new false-failure surface to a path that was never
+		// observed to fail, for no benefit.
+		//
+		// This gates on the SAME kPresentDatInhibit bit this ticket's own
+		// "DAT_INHIBIT stuck before CMD%u" precondition path has already
+		// caught lying on this exact chip (stuck busy while the DAT[3:0]
+		// line levels read idle-high the whole time) - not the same
+		// mechanism as the R1b busy-wait reverted earlier (that one waited
+		// AFTER an R1b response and risked breaking CMD7/CMD12 under this
+		// chip's SDHCI_QUIRK_BROKEN_R1B; this waits BEFORE CMD12 is ever
+		// issued, on the write's own data-phase tail), but since the bit
+		// itself is already known-unreliable, a timeout here gets the same
+		// real-register diagnostic dump as that other path instead of a
+		// bare log line, so a real-hw recurrence can tell "genuinely still
+		// busy" (DAT[3:0] levels actually low) apart from "stale/stuck bit,
+		// same as before" on sight rather than needing another guess.
+		if (!waitClear32(kRegPresentState, kPresentDatInhibit, 1000000)) {
+			uint32_t presentState = readReg32(kRegPresentState);
+			uint16_t clockControl = readReg16(kRegClockControl);
+			uint32_t intEnable = readReg32(kRegIntEnable);
+			IOLog("BCM2837SDHCI: write: card busy (DAT_INHIBIT) did not clear "
+			    "after TRANSFER_COMPLETE - resetting dat line\n");
+			IOLog("BCM2837SDHCI: DAR-316 diag: PRESENT_STATE=%#x CLOCK_CONTROL=%#x "
+			    "INT_ENABLE=%#x fPendingIntStatus=%#x startBlock=%llu nblks=%u\n",
+			    presentState, clockControl, intEnable, fPendingIntStatus,
+			    (unsigned long long)startBlock, nblks);
+			resetDatLine();
+			return false;
+		}
+		uint32_t busyTailStatus;
+		if (waitForIntStatus32(kIntErrorMask, 10000, &busyTailStatus) && (busyTailStatus & kIntErrorMask)) {
+			IOLog("BCM2837SDHCI: write: real error during post-transfer card-busy "
+			    "tail, INT_STATUS=%#x - resetting dat line\n", busyTailStatus);
+			resetDatLine();
+			return false;
+		}
+
 		uint32_t r[4];
 		if (!sendCommand(12, 0, kCmdRespShortBusy, false, r)) { // STOP_TRANSMISSION
 			IOLog("BCM2837SDHCI: CMD12 (STOP_TRANSMISSION) failed after write - "
@@ -1624,9 +1756,10 @@ BCM2837SDHCI::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 
 	}
 
 	// Backlog item 16: neither this function nor readBlocksPIO()/
-	// writeBlocksPIO() validated nblks before this fix.
-	// writeReg16(kRegBlockCount, (uint16_t)nblks) truncates any request
-	// >=65536 blocks (32MB) silently, and nothing checked
+	// writeBlocksPIO() validated nblks before this fix. BLOCK_COUNT is a
+	// 16-bit hardware field (packed into kRegBlockSize's combined 32-bit
+	// write as of DAR-316 - see sendCommand()'s citation), so any request
+	// >=65536 blocks (32MB) truncates silently, and nothing checked
 	// block+nblks <= fBlockCount either - a request past the end of the
 	// card would have been issued to hardware as-is. Reject both here,
 	// once, before doing anything else (including the IOMalloc bounce

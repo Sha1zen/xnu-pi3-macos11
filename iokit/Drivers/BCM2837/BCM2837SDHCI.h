@@ -148,6 +148,19 @@ private:
 	IOMemoryMap *fRegMap;
 	volatile void *fRegBase;
 
+	// DAR-316: software shadow of the last value written to kRegTransferMode
+	// (0x0C). Real erratum (see sendCommand()'s own citation): TRANSFER_MODE
+	// and COMMAND (0x0E) are the same 32-bit hardware word on this SoC, and
+	// this holds regardless of whether the command being issued has a data
+	// phase - u-boot's own bcm2835_sdhci_writew() shadows TRANSFER_MODE and
+	// combines it into EVERY COMMAND write unconditionally, never only for
+	// data commands. sendCommand() mirrors that exactly: hasData==true
+	// updates this shadow before combining; hasData==false just re-combines
+	// whatever is already here (unchanged, since non-data commands never
+	// touch TRANSFER_MODE's meaning) rather than doing a bare, independent
+	// 16-bit COMMAND write.
+	uint16_t fShadowTransferMode;
+
 	// Interrupt-driven completion state (see waitForIntStatus32()).
 	IOLock       *fInterruptLock;   // block/wake coordination only - never touched from interrupt context
 	IOSimpleLock *fStatusLock;      // protects fPendingIntStatus between interruptOccurred() and waiters
@@ -355,11 +368,50 @@ private:
 	// wait_for_completion(&host->cmd_done) after sdhci_send_command().
 	bool     waitForIntStatus32(uint32_t mask, uint32_t timeoutUs, uint32_t *outStatus);
 
+	// Writes kRegBlockSize's combined 32-bit word (BLOCK_SIZE low 16 bits,
+	// BLOCK_COUNT high 16 bits - see sendCommand()'s own citation for why
+	// they're one hardware word), then reads it back and retries (bounded)
+	// if it doesn't match. DAR-316: added after a real-hw boot showed a
+	// recurring per-block write timeout, always on block index 1 regardless
+	// of total block count, with a register dump showing PRESENT_STATE
+	// completely idle (not busy) and a stale, unconsumed TRANSFER_COMPLETE
+	// already sitting in fPendingIntStatus - i.e. the controller believed
+	// the transfer was already fully done after just one block, consistent
+	// with BLOCK_COUNT staying at a stale earlier value (often 1, from a
+	// preceding single-block op) instead of the newly-requested count.
+	//
+	// IMPORTANT, honestly stated (adversarial review, 2026-09-16): this
+	// write was ALREADY a single atomic 32-bit writeReg32() before this
+	// method existed - the real Arasan/Linux erratum cited elsewhere in
+	// this file (two independent 16-bit writes to one hardware word) is
+	// specifically what an atomic 32-bit write is documented to fix, so
+	// this method's own external CPU read-back matching what was written
+	// does NOT rule out a related-but-different mechanism: the SDHCI
+	// core's own INTERNAL block-count latch (the copy actually consulted
+	// when BUFFER_WRITE_READY/TRANSFER_COMPLETE fire) could in principle
+	// sample BLOCK_COUNT on a different internal timing boundary than an
+	// external bus read reflects, in which case a read-back matching the
+	// write would still not catch a stale internal latch. This method is
+	// therefore a real, honest best-effort mitigation plus a diagnostic,
+	// not a confirmed fix - its own log output (does the "did not stick"
+	// message ever fire? does the retry visibly help or does the original
+	// bug still recur even when every read-back matches?) is real evidence
+	// this ticket needs either way, not a foregone conclusion.
+	void     writeBlockSizeCountVerified(uint16_t blockCount, uint16_t blockSize);
+
 	// Issues one SD command, waits for completion, and reads the response
 	// into resp[0..3] (only resp[0] valid unless respType==kCmdRespLong).
 	// Returns false on any error/timeout status bit or CMD_INHIBIT stuck.
+	//
+	// `transferMode` (only meaningful when hasData is true) is combined with
+	// the COMMAND value into a single 32-bit write to kRegTransferMode -
+	// see the real, cited erratum on that write in the .cpp (DAR-316):
+	// TRANSFER_MODE (0x0C) and COMMAND (0x0E) are the same 32-bit hardware
+	// word on this SoC, and two independent 16-bit writes to it can drop
+	// one of them. Callers with hasData==false never touch TRANSFER_MODE
+	// and pass 0 (unused).
 	bool     sendCommand(uint8_t cmdIndex, uint32_t arg, uint32_t respType,
-	                      bool hasData, uint32_t resp[4]);
+	                      bool hasData, uint32_t resp[4], uint16_t transferMode = 0);
 
 	// Pin-muxes GPIO48-53 to ALT3 ("emmc_gpio48" in Linux DT), routing
 	// this controller to the physical SD slot instead of leaving it on

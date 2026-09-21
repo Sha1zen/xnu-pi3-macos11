@@ -138,11 +138,24 @@ private:
 	};
 	// Re-poll interval for pollReceive() while the interface is enabled.
 	// SMSC9514USBTransport::bulkIn() itself bounds each individual poll's
-	// NAK-retry loop short (20ms, not transfer()'s 1000ms default) so an
-	// idle poll can't hold up TX/link-status polling on the shared
-	// workloop - this is how often a new poll gets kicked off.
+	// NAK-retry loop short (kRxPollTimeoutMS there, not transfer()'s 1000ms
+	// default) so an idle poll can't hold up TX/link-status polling on the
+	// shared workloop - this is how often a new poll gets kicked off.
+	//
+	// DAR-344: this re-arm is scheduled kRxPollIntervalMS from when the
+	// PREVIOUS poll returned, not from when it started, so a poll that
+	// found nothing (itself up to kRxPollTimeoutMS of NAK-retrying) stacks
+	// with this interval - worst-case gap between NAK-checks was
+	// kRxPollTimeoutMS + kRxPollIntervalMS (20+20=40ms), giving a real,
+	// measured ~13-21ms average RTT on a same-switch LAN ping that should
+	// be sub-millisecond. Lowered from 20 to 4 (with kRxPollTimeoutMS
+	// matching in SMSC9514USBTransport.cpp) to cut worst-case latency
+	// ~5x; this is a mitigation, not a fix - the real fix is interrupt/
+	// async-driven DWC2 transfer completion (BCM2837DWC2.h's "KNOWN
+	// LIMITATIONS": transfer completion is polled and global, not
+	// interrupt-driven).
 	enum {
-		kRxPollIntervalMS = 20,
+		kRxPollIntervalMS = 4,
 	};
 
 	// SCSRs (System Control and Status Registers), byte offsets.
@@ -153,6 +166,12 @@ private:
 		kRegTxCfg   = 0x10,
 		kRegHwCfg   = 0x14,
 		kRegPmCtl   = 0x20,
+		// LED_GPIO_CFG - the LAN9514's GPIO0/1/2 pin-function register.
+		// Real offset from third_party/u-boot/drivers/usb/eth/smsc95xx.c:22
+		// (Linux's drivers/net/usb/smsc95xx.h agrees). On a Pi 3 these three
+		// pins are the only thing driving the RJ45 jack's LEDs - see
+		// resetChip()'s write of it.
+		kRegLedGpioCfg = 0x24,
 		kRegAfcCfg  = 0x2C,
 		kRegE2pCmd  = 0x30,
 		kRegE2pData = 0x34,
@@ -198,6 +217,16 @@ private:
 		kBulkInDelay = 0x00002000,
 
 		kPmCtlPhyRst = 1U << 4,
+
+		// LED_GPIO_CFG pin-function selects, real values from
+		// third_party/u-boot/drivers/usb/eth/smsc95xx.c:23-25
+		// (LED_GPIO_CFG_SPD_LED/_LNK_LED/_FDX_LED). Each nibble-aligned
+		// field picks what GPIOn does; these three values select the
+		// nSPD_LED/nLNK_LED/nFDX_LED hardware LED outputs rather than the
+		// plain-GPIO default the chip powers up (and lite-resets) into.
+		kLedGpioCfgSpdLed = 0x01000000, // GPIO2 -> speed (10/100) LED
+		kLedGpioCfgLnkLed = 0x00100000, // GPIO1 -> link/activity LED
+		kLedGpioCfgFdxLed = 0x00010000, // GPIO0 -> full-duplex/collision LED
 
 		kMacCrMcPas = 1U << 19, // Pass All Multicast
 		kMacCrPrmS  = 1U << 18, // Promiscuous Mode

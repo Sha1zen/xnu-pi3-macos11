@@ -48,19 +48,41 @@
  *
  * ======================= KNOWN LIMITATIONS (honest) =====================
  *
- *   - Transfer completion is POLLED, not interrupt-driven, and global
- *     interrupts are deliberately left masked (GAHBCFG.GLBLINTRMSK clear),
- *     exactly as u-boot does. docs/usb-support-plan.md task 2 calls for
- *     mirroring BCM2837SDHCI's interrupt-driven design instead, and that
- *     remains the right end state - but doing it in the same change as the
- *     first-ever register bring-up would mean debugging two unproven things
- *     at once, and this board's history (BCM2837SDHCI's interrupt work
- *     needed three passes and a device-tree root cause before a real
- *     interrupt was ever observed) argues strongly against that. The poll
- *     loops are bounded and report timeouts; converting them to
- *     IOLockSleep-on-interrupt is a contained follow-up.
+ *   - UPDATE (DAR-136, commit 6b58912): channel-completion waits are now
+ *     real interrupt-driven (interruptOccurred() / waitForChannelInt()),
+ *     with a direct-register-poll fallback for the case no interrupt lands
+ *     within one tick - see fInterruptLock's own header comment for the
+ *     full design (modeled on BCM2837SDHCI's fInterruptLock/fStatusLock
+ *     split). GAHBCFG.GLBLINTRMSK is set in start(), after the handler is
+ *     registered. The paragraph this replaced (which said completion was
+ *     purely polled and GLBLINTRMSK was left clear) described the
+ *     first-cut bring-up and is no longer true of this file - left here,
+ *     corrected rather than deleted, because DAR-351 found
+ *     SMSC9514Ethernet.h still citing the old version of this section by
+ *     name; don't let that happen to *this* correction too.
+ *   - What DAR-136 did NOT change, and what still bounds real RX latency
+ *     (DAR-351): this driver still drives exactly ONE host channel
+ *     (kDWC2Channel) for every transfer, RX and TX alike (see the
+ *     "Divergences from u-boot" note above). A bulk-IN endpoint has no way
+ *     to tell the host "data is ready" other than the host asking via an
+ *     IN token, so SMSC9514Ethernet's RX side still has to periodically
+ *     re-arm a new bulk-IN listen (fRxTimer) rather than sit on one
+ *     already-armed request forever - continuous back-to-back re-arming
+ *     would starve TX and link-status polling of the same shared channel
+ *     for as long as RX held it. DAR-136 made each individual transaction's
+ *     completion wait fast (sub-millisecond once armed, real interrupt
+ *     latency rather than a register-poll loop); it did not and could not
+ *     remove the RX-vs-TX channel-sharing gap between arms, since that is
+ *     a single-channel design choice, not a completion-detection one. The
+ *     real fix for that remaining gap is a second host channel dedicated
+ *     to RX (the silicon has up to 8 - see fNumChannels), so TX/link-status
+ *     can use channel 0 without waiting on an outstanding RX listen. Not
+ *     done: unverifiable in QEMU (LAN9514 is never emulated - see
+ *     reference_qemu_lan9514_never_emulated) and real-hardware time was not
+ *     available this session (DAR-351).
  *   - Isochronous transfers are unimplemented and will not be: no consumer.
- *   - One transfer at a time, no queueing, no async completion callbacks.
+ *   - One transfer at a time on the single active channel, no queueing
+ *     across channels, no cross-channel async completion callbacks.
  */
 
 #ifndef _BCM2837_DWC2_H
@@ -528,6 +550,41 @@ private:
 	uint32_t                 fPollFallbackHits;
 	bool                     fLoggedRealInterrupt;
 	bool                     fLoggedPollFallback;
+
+	/*
+	 * DAR-352: real hardware, real, reproduced-twice failure -
+	 * haltChannel()'s forced CHEN+CHDIS write can fail to complete even
+	 * after retrying (see haltChannel()'s own updated comment), leaving
+	 * the single shared host channel permanently unusable. Once that is
+	 * confirmed, the channel must never be touched again - re-arming a
+	 * channel whose CHENA never really cleared is not a real
+	 * disable->enable edge (this whole file's running theme, e.g. DAR-282/
+	 * DAR-290's own comments), so retrying forever just re-discovers the
+	 * same stuck state every timeout period, forever, flooding the console
+	 * and leaving the whole board looking hung (confirmed on real hardware
+	 * - see DAR-352). fChannelWedged is checked once, centrally, at the
+	 * top of doTransfer() (every public entry point funnels through it
+	 * under fTransferLock, already held on every path that could set or
+	 * read this), so setting it makes every future transfer() /
+	 * controlTransfer() / transferStage() call fail instantly and cleanly
+	 * (kIOReturnNotAttached) instead of touching hardware again. No
+	 * separate lock: guarded by fTransferLock like every other field
+	 * doTransfer()/haltChannel() touch, and every read/write of it already
+	 * happens with that lock held. Relies on this class's normal
+	 * zero-initialization (same as fPendingHcInt/fRealInterruptHits/
+	 * fLoggedRealInterrupt above, none of which get an explicit `= 0`/
+	 * `= false` in start() either) rather than an explicit init line, for
+	 * consistency with those sibling fields.
+	 *
+	 * This does NOT recover the controller - that needs a real core
+	 * reset + host re-init + root-port re-bring-up + bus re-enumeration,
+	 * scoped but not implemented (DAR-352's own "full fix"). This is only
+	 * the "stop hammering, fail cleanly" half: it keeps the rest of the
+	 * board (console, unrelated subsystems) responsive after a wedge
+	 * instead of an endless retry storm, but real recovery still needs a
+	 * physical power cycle until the full fix lands.
+	 */
+	bool                     fChannelWedged;
 
 	/*
 	 * DAR-297: registerInterfaceWithBSD() can be reached from two

@@ -143,6 +143,39 @@ BCM2837CPU::initCPU(bool boot)
 
 	sBCM2837CPUIC->enableCPUInterrupt(this);
 
+	/*
+	 * DAR-375: open this CPU for signals, or it never idles.
+	 *
+	 * Every CPU starts with cpu_signal = SIGPdisabled
+	 * (osfmk/arm64/cpu.c:738). The only thing that clears it is
+	 * cpu_signal_handler() -> cpu_signal_handler_internal(FALSE)
+	 * (osfmk/arm/cpu_common.c:541-562), and that is the IPI handler
+	 * ml_processor_register() just handed back
+	 * (osfmk/arm64/machine_routines.c:1255). On a real multi-core Apple SoC
+	 * the other cores' IPIs call it soon enough. Here cpu1-3 are parked
+	 * and this class sends no IPIs, so it never ran: cpu0 kept
+	 * SIGPdisabled for its whole uptime. cpu_idle() treats that as "idle
+	 * disallowed" and returns before WFI (osfmk/arm64/cpu.c:409-414), so
+	 * processor_idle() spun, ~22,000 loops/s at an idle shell. That was
+	 * QEMU's ~100% host CPU, and on a real Pi a core that never idles.
+	 * Confirmed from guest memory: idle_enable == 1,
+	 * cpu_data[0].cpu_signal == 0x80000000.
+	 *
+	 * Run the handler once here, as this CPU's first IPI would, with
+	 * interrupts off as they are for a real IPI. With nothing pending it
+	 * only clears SIGPdisabled (its signal loop runs zero times).
+	 * Self-signals never checked the flag
+	 * (cpu_signal_internal(): Check_SIGPdisabled = 0 when target == self,
+	 * cpu_common.c:423-427), and there is no other CPU to signal this one,
+	 * so the one behaviour this changes is that cpu_idle() now reaches
+	 * WFI.
+	 */
+	if (ipi_handler != NULL) {
+		boolean_t istate = ml_set_interrupts_enabled(FALSE);
+		ipi_handler();
+		ml_set_interrupts_enabled(istate);
+	}
+
 	// Publish the controller only now that it's actually enabled - see
 	// the comment above at its allocation for why this moved here.
 	if (justCreatedIC) {

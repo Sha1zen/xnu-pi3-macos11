@@ -7,6 +7,7 @@
 #include "BCM2837USBHostController.h"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOKitKeys.h>
 #include <IOKit/usb/IOUSBDevice.h>
 #include <IOKit/usb/IOUSBRootHubDevice.h>
 #include <IOKit/usb/USB.h>
@@ -214,6 +215,8 @@ BCM2837USBHostController::init(OSDictionary *propTable)
 	fAsyncPolled = 0;
 	fAsyncEvent = NULL;
 	fAsyncEventDeferred = false;
+	fReenumTestCall = NULL;
+	fReenumTestMask = 0;
 	fRootHubIntPending = false;
 	bzero(&fRootHubIntCompletion, sizeof(fRootHubIntCompletion));
 
@@ -285,6 +288,12 @@ BCM2837USBHostController::free(void)
 		IOFree(fStaging, fStagingSize);
 		fStaging = NULL;
 		fStagingSize = 0;
+	}
+
+	if (fReenumTestCall != NULL) {
+		thread_call_cancel_wait(fReenumTestCall);
+		thread_call_free(fReenumTestCall);
+		fReenumTestCall = NULL;
 	}
 
 	if (fFrameLock != NULL) {
@@ -365,6 +374,30 @@ BCM2837USBHostController::UIMInitialize(IOService *provider)
 	if (fAsyncEvent != NULL) {
 		fAsyncEvent->enable();
 		fDWC2->setAsyncNotify(fAsyncEvent);
+	}
+
+	/*
+	 * usb-reenum-test=<mask> (DAR-373 verification only): usb-reenum-delay
+	 * seconds after start (default 90), call IOUSBDevice::ReEnumerateDevice()
+	 * on every published device whose address has its bit set in <mask>.
+	 * That is the same public call a driver's recovery path makes. Nothing
+	 * in this kernel calls it on demand otherwise, and there is no USB user
+	 * client to reach it from userspace.
+	 */
+	uint32_t reenumMask = 0;
+	if (PE_parse_boot_argn("usb-reenum-test", &reenumMask, sizeof(reenumMask)) &&
+	    reenumMask != 0) {
+		uint32_t delay = 90;
+		PE_parse_boot_argn("usb-reenum-delay", &delay, sizeof(delay));
+		fReenumTestMask = reenumMask;
+		fReenumTestCall = thread_call_allocate(reenumTestFired, this);
+		if (fReenumTestCall != NULL) {
+			uint64_t deadline;
+			clock_interval_to_deadline(delay, kSecondScale, &deadline);
+			thread_call_enter_delayed(fReenumTestCall, deadline);
+			IOLog("BCM2837USBHostController: usb-reenum-test mask %#x in %u s\n",
+			    reenumMask, delay);
+		}
 	}
 
 	// Nothing is queued yet, so the engine starts parked. The first
@@ -467,7 +500,7 @@ BCM2837USBHostController::createEndpoint(UInt8 functionNumber, UInt8 endpointNum
 	const DWC2USBDevice *dev = NULL;
 	for (uint32_t i = 0; i < fDWC2->deviceCount(); i++) {
 		const DWC2USBDevice *candidate = fDWC2->deviceAt(i);
-		if (candidate != NULL && candidate->address == functionNumber) {
+		if (candidate != NULL && candidate->inUse && candidate->address == functionNumber) {
 			dev = candidate;
 			break;
 		}
@@ -2002,7 +2035,7 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	// The hub side of this device's port (DAR-372; see BCM2837USBPortPolicy).
 	// Before registerService(), so no driver can match and suspend the
 	// device before its hub parent exists.
-	BCM2837USBPortPolicy *policy = BCM2837USBPortPolicy::withDevice(nub);
+	BCM2837USBPortPolicy *policy = BCM2837USBPortPolicy::withDevice(this, nub);
 	if (policy != NULL) {
 		nub->SetHubParent(policy);      // retains it
 		policy->release();
@@ -2034,10 +2067,64 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	return kIOReturnSuccess;
 }
 
+IOReturn
+BCM2837USBHostController::ReEnumerateAddress(UInt8 address, bool extraResetDelay)
+{
+	IOReturn ret = fDWC2->reenumerateDevice(address, extraResetDelay);
+	if (ret != kIOReturnSuccess) {
+		return ret;
+	}
+	for (uint32_t i = 0; i < fDWC2->deviceCount(); i++) {
+		const DWC2USBDevice *dev = fDWC2->deviceAt(i);
+		if (dev != NULL && dev->inUse && dev->address == address) {
+			IOLog("BCM2837USBHostController: re-enumerated device %u, "
+			    "publishing it again\n", address);
+			return PublishEnumeratedDevice(dev);
+		}
+	}
+	return kIOReturnNoDevice;
+}
+
+void
+BCM2837USBHostController::reenumTestFired(thread_call_param_t owner, thread_call_param_t)
+{
+	BCM2837USBHostController *me = (BCM2837USBHostController *)owner;
+
+	for (UInt8 address = 1; address < 32; address++) {
+		if (!(me->fReenumTestMask & (1U << address))) {
+			continue;
+		}
+		IOUSBDevice *target = NULL;
+		OSIterator *it = me->getClientIterator();
+		if (it != NULL) {
+			OSObject *obj;
+			while ((obj = it->getNextObject()) != NULL) {
+				IOUSBDevice *d = OSDynamicCast(IOUSBDevice, obj);
+				if (d != NULL && d->GetAddress() == address) {
+					target = d;
+					target->retain();
+					break;
+				}
+			}
+			it->release();
+		}
+		if (target == NULL) {
+			IOLog("BCM2837USBHostController: usb-reenum-test: no device at %u\n", address);
+			continue;
+		}
+		IOReturn ret = target->ReEnumerateDevice(0);
+		IOLog("BCM2837USBHostController: usb-reenum-test: ReEnumerateDevice(%u) "
+		    "returned 0x%x\n", address, ret);
+		target->release();
+		// ReEnumerateDevice() queues the work; give it time before the next.
+		IOSleep(5000);
+	}
+}
+
 #pragma mark - BCM2837USBPortPolicy (DAR-372)
 
 BCM2837USBPortPolicy *
-BCM2837USBPortPolicy::withDevice(IOUSBDevice *device)
+BCM2837USBPortPolicy::withDevice(BCM2837USBHostController *controller, IOUSBDevice *device)
 {
 	BCM2837USBPortPolicy *me = new BCM2837USBPortPolicy;
 	if (me == NULL) {
@@ -2048,6 +2135,7 @@ BCM2837USBPortPolicy::withDevice(IOUSBDevice *device)
 		return NULL;
 	}
 	me->fDevice = device;
+	me->fController = controller;
 	return me;
 }
 
@@ -2108,6 +2196,53 @@ BCM2837USBPortPolicy::GetPortInformation(UInt32 portNum, UInt32 *info)
 		*info = 0;
 	}
 	return kIOReturnNoDevice;
+}
+
+/*
+ * Called on the device's own _DO_PORT_REENUMERATE_THREAD
+ * (IOUSBDevice::ProcessPortReEnumerateEntry(), which holds a reference to the
+ * device for the duration), after _ReEnumerateDevice() has already closed
+ * pipe zero and terminated the interfaces. See the header for the Apple
+ * sequence this follows.
+ */
+IOReturn
+BCM2837USBPortPolicy::ReEnumeratePort(UInt32 portNum, UInt32 options)
+{
+#pragma unused (portNum)
+	IOUSBDevice *old = fDevice;
+	BCM2837USBHostController *controller = fController;
+	UInt8 address = old->GetAddress();
+
+	// Terminating the device finalizes it, and its finalize() releases its
+	// hub parent - this object. Keep both alive until this returns.
+	retain();
+	old->retain();
+
+	// RemoveDevice(), AppleUSBHubPort.cpp:1074-1150.
+	const IORegistryPlane *usbPlane = old->getPlane(kIOUSBPlane);
+	if (usbPlane != NULL) {
+		old->detachAll(usbPlane);
+	}
+	for (UInt32 retries = 100; old->getBusyState() && retries > 0; retries--) {
+		IOSleep(100);
+	}
+	if (old->getBusyState()) {
+		IOLog("BCM2837USBHostController: device %u still busy after 10 s, "
+		    "terminating anyway (re-enumerate)\n", address);
+	}
+	old->terminate(kIOServiceRequired | kIOServiceSynchronous);
+	old->release();
+
+	// The add half.
+	IOReturn ret = controller->ReEnumerateAddress(address,
+	    (options & kUSBAddExtraResetTimeMask) != 0);
+	if (ret != kIOReturnSuccess) {
+		IOLog("BCM2837USBHostController: re-enumeration of device %u failed "
+		    "(0x%x)\n", address, ret);
+	}
+
+	release();
+	return ret;
 }
 
 UInt32

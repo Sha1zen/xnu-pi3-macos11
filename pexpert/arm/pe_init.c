@@ -640,23 +640,33 @@ bcm2837_video_init(PE_Video *video)
 		return FALSE;
 	}
 
-	/* Write-combining, not plain ml_io_map()'s strict-device mapping -
-	 * same reasoning this file's panic-log buffer mapping (search
-	 * ml_io_map_wcomb above) uses: this is a bulk memory buffer another
-	 * agent (the GPU's HDMI scanout engine) reads asynchronously with no
-	 * CPU cache involved, not a register window that needs strict
-	 * per-access ordering. */
-	vm_offset_t fbVirtAddr = ml_io_map_wcomb(fbPhysAddr, fbSize);
-	if (fbVirtAddr == 0) {
-		return FALSE;
-	}
-
-	video->v_baseAddr = fbVirtAddr;
+	/* PHYSICAL address, not a mapping (DAR-331). This used to hand over
+	 * an ml_io_map_wcomb() VIRTUAL address, but every consumer of
+	 * v_baseAddr on this path treats it as physical:
+	 *  - initialize_screen() (osfmk/console/video_console.c:2902-2906)
+	 *    maps it itself with io_map_spec() whenever kernel_map is still
+	 *    NULL -- which it is when arm_init() calls PE_create_console() --
+	 *    so it was io-mapping a kernel VA as if it were a PA (visible in
+	 *    the boot log as "initialize_screen: b=FFFFFFF0...") and drawing
+	 *    into the wrong memory. Likely the real cause of the "shows
+	 *    blank" note at arm_init.c's hdmi_console gate.
+	 *  - IOBootFramebuffer::getApertureRange() builds an IODeviceMemory
+	 *    from it (IOGraphics IOBootFramebuffer.cpp:236).
+	 * That is also what a real boot loader passes in boot_args->Video,
+	 * which PE_init_platform() copies verbatim (this file, :676). */
+	video->v_baseAddr = fbPhysAddr;
+	video->v_length = fbSize;
 	video->v_rowBytes = fbPitch;
 	video->v_width = BCM2837_FB_WIDTH;
 	video->v_height = BCM2837_FB_HEIGHT;
 	video->v_depth = BCM2837_FB_DEPTH;
-	video->v_display = 1; /* nonzero -> PE_create_console() picks kPEGraphicsMode */
+	/* 0 -> PE_create_console() picks kPETextMode, so kPEAcquireScreen
+	 * (kern/startup.c:721) runs gc_enable(TRUE) and the framebuffer
+	 * becomes a text console (video_console.c:2989-3024). It used to be
+	 * 1 (kPEGraphicsMode), which only ever arms the boot progress
+	 * spinner -- and runvm.sh passes -noprogress -- so nothing was ever
+	 * drawn. */
+	video->v_display = 0;
 	return TRUE;
 }
 

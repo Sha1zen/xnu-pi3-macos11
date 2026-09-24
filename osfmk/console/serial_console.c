@@ -328,16 +328,34 @@ get_cons_ops_index(void)
 	return idx;
 }
 
+/*
+ * DAR-331: mirror console output to the video console too. Set by
+ * arm_init() only when the "hdmi_console" boot-arg is given AND
+ * bcm2837_video_init() got a real framebuffer. cons_ops_index itself
+ * stays SERIAL_CONS_OPS (see its comment above): input, and every
+ * existing serial consumer, are unchanged; the video console just gets
+ * a copy of the same bytes. vcputc() is the VC_CONS_OPS putc this table
+ * would otherwise call, and is a no-op until gc_enable() has run.
+ */
+boolean_t console_mirror_to_video = FALSE;
+
 static inline void
 _cnputs(char * c, int size)
 {
 	uint32_t idx = get_cons_ops_index();
+	boolean_t mirror = console_mirror_to_video && (idx == SERIAL_CONS_OPS);
 
 	while (size-- > 0) {
 		if (*c == '\n') {
 			cons_ops[idx].putc(0, 0, '\r');
+			if (mirror) {
+				vcputc(0, 0, '\r');
+			}
 		}
 		cons_ops[idx].putc(0, 0, *c);
+		if (mirror) {
+			vcputc(0, 0, *c);
+		}
 		c++;
 	}
 }

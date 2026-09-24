@@ -470,24 +470,25 @@ arm_init(
 	 * bootstrapped) and before PE_create_console(). On any failure this
 	 * just leaves PE_state.video zeroed, identical to not calling it.
 	 *
-	 * Gated behind the "hdmi_console" boot-arg, default off: the mailbox
-	 * handshake itself succeeds (real framebuffer address obtained), but
-	 * with a real screen attached (-display cocoa) it shows blank -
-	 * something past this point (vc_* paint ops, pixel format/pitch, or
-	 * the QEMU framebuffer device itself) isn't right yet, and that's
-	 * unverified/shelved for now. Since v_display=1 unconditionally
-	 * steers PE_create_console() to kPEGraphicsMode, leaving this on
-	 * silently sends all kprintf/printf console output to that (not
-	 * currently working) framebuffer instead of serial, which broke
-	 * headless dev - see project memory ("console output gap"). Default
-	 * off restores serial console for normal development; pass
-	 * "hdmi_console=1" on the QEMU -append line to re-enable and debug
-	 * the framebuffer path later. */
+	 * Gated behind the "hdmi_console" boot-arg, default off (runvm.sh
+	 * stays serial-only; runvm_hdmi.sh passes it). It used to leave the
+	 * screen blank for two reasons, both fixed for DAR-331: the
+	 * framebuffer's VIRTUAL address was handed to initialize_screen(),
+	 * which treats v_baseAddr as physical this early (see
+	 * bcm2837_video_init()), and v_display=1 selected graphics/progress
+	 * mode, which never draws text. Console output now goes to serial as
+	 * before AND is mirrored to the framebuffer
+	 * (console_mirror_to_video, osfmk/console/serial_console.c). */
 	unsigned int hdmi_console_boot_arg = 0;
 	PE_parse_boot_argn("hdmi_console", &hdmi_console_boot_arg, sizeof(hdmi_console_boot_arg));
 	if (hdmi_console_boot_arg) {
 		extern boolean_t bcm2837_video_init(PE_Video *video);
-		bcm2837_video_init(&PE_state.video);
+		extern boolean_t console_mirror_to_video;
+		/* DAR-331: on success, mirror all console output to the HDMI text
+		 * console as well as serial (osfmk/console/serial_console.c). */
+		if (bcm2837_video_init(&PE_state.video)) {
+			console_mirror_to_video = TRUE;
+		}
 	}
 
 	if (debug_boot_arg) {

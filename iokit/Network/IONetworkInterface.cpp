@@ -901,6 +901,53 @@ inline static void checkForRNMIPacket(mbuf_t pkt, int hdrlen, int datalen, const
         IOKernelDebugger::signalDebugger();
 }
 
+/*
+ * DAR-374. inputPacket() and enqueueInputPacket() strip the media header
+ * unconditionally: the length becomes length - hdrlen and the first mbuf's
+ * data skips hdrlen bytes. A frame shorter than its header therefore reached
+ * dlil with a negative m_len, and dlil's unconditional MBUF_INPUT_CHECK
+ * (bsd/net/dlil.c:4671, bsd/sys/mbuf.h:947-960) panicked the kernel
+ * ("Failed mbuf validity check ... len -6"; seen once in QEMU, when a CDC-ECM
+ * bulk-IN completion delivered 8 bytes). Every driver's input passes through
+ * those two functions, so the check lives here, not in each driver.
+ *
+ * Returns false when the frame was dropped (and freed): it is shorter than
+ * the header, or its header is split across mbufs and could not be pulled up
+ * into the first one. A split header that pulls up fine is a legal chain and
+ * is accepted; *packet may then point to a different first mbuf. A drop
+ * counts as an input error, as a driver counts a frame it drops; the first
+ * few are logged, so a real occurrence is visible without flooding the
+ * console.
+ */
+static bool acceptInputFrame( ifnet_t ifp, mbuf_t *packet, UInt32 length, UInt32 hdrlen )
+{
+    static volatile SInt32 sLogged = 0;
+
+    if (length >= hdrlen)
+    {
+        if (mbuf_len(*packet) >= hdrlen)
+            return true;
+        // mbuf_pullup() frees the whole chain itself when it fails
+        // (bsd/sys/kpi_mbuf.h:741-746).
+        if (mbuf_pullup(packet, hdrlen) == 0)
+            return true;
+        *packet = NULL;
+    }
+    else
+    {
+        mbuf_freem(*packet);
+        *packet = NULL;
+    }
+
+    ifnet_stat_increment_in(ifp, 0, 0, 1);
+    if (sLogged < 5 && OSIncrementAtomic(&sLogged) < 5)
+    {
+        IOLog("%s%u: dropped a %u-byte frame: shorter than, or could not hold, its %u-byte media header (DAR-374)\n",
+              ifnet_name(ifp), ifnet_unit(ifp), (unsigned) length, (unsigned) hdrlen);
+    }
+    return false;
+}
+
 UInt32 IONetworkInterface::inputPacket( mbuf_t          packet,
                                         UInt32          length,
                                         IOOptionBits    options,
@@ -950,6 +997,22 @@ UInt32 IONetworkInterface::inputPacket( mbuf_t          packet,
     else
     {
         length = (UInt32)mbuf_pkthdr_len(packet);
+    }
+
+    // DAR-374: see acceptInputFrame().
+    if (!acceptInputFrame(_backingIfnet, &packet, length, hdrlen))
+    {
+        // Still act as the flush point this call would have been: frames a
+        // driver queued with kInputOptionQueuePacket must not wait for its
+        // next input call because this one was dropped.
+        if (!(options & kInputOptionQueuePacket) &&
+            !IOMbufQueueIsEmpty(_inputPushQueue))
+        {
+            count = _inputPushQueue->count;
+            pushInputQueue(_inputPushQueue);
+            return count;
+        }
+        return 0;
     }
 
     // check for special debugger packet
@@ -3228,6 +3291,12 @@ IOReturn IONetworkInterface::enqueueInputPacket(
 
     length = (uint32_t)mbuf_pkthdr_len(packet);
     assert(length != 0);
+
+    // DAR-374: see acceptInputFrame().
+    if (!acceptInputFrame(_backingIfnet, &packet, length, hdrlen))
+    {
+        return kIOReturnUnderrun;
+    }
 
     // check for special debugger packet
     if (_remote_NMI_len)

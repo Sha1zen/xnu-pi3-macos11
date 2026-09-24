@@ -6020,6 +6020,20 @@ mptcp_pcblist SYSCTL_HANDLER_ARGS
 		return EPERM;
 	}
 
+	/*
+	 * This kernel does not attach the MULTIPATH domain (uipc_domain.c,
+	 * `#if 0 attach_domain(&mpdomain_s)`), so mptcp_init() never ran and
+	 * mppi_lock was never initialized, but this sysctl is registered
+	 * statically. Reading it panicked the kernel ("Invalid mutex") from
+	 * `netstat -an`. Answer as a kernel without MPTCP would: no such
+	 * list. netstat treats ENOENT from this OID as exactly that
+	 * (network_cmds netstat.tproj/mptcp.c:140). mppi_lock_grp is set only
+	 * by mptcp_init(), just before the lock.
+	 */
+	if (mtcbinfo.mppi_lock_grp == NULL) {
+		return ENOENT;
+	}
+
 	lck_mtx_lock(&mtcbinfo.mppi_lock);
 	if (req->oldptr == USER_ADDR_NULL) {
 		size_t n = mtcbinfo.mppi_count;

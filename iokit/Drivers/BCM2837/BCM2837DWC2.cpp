@@ -11,8 +11,10 @@
 #include "BCM2837USBHostController.h"
 
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/network/IONetworkStack.h>
+#include <pexpert/pexpert.h>
 
 // iokit/bsddev/IOKitBSDInit.cpp (real Apple source, kernel-private). Used
 // to be `static` and only reachable from within that file for the
@@ -161,10 +163,12 @@ BCM2837DWC2::waitForAnyBits(uint32_t offset, uint32_t mask, uint32_t timeoutMS)
  * no IOLockLock/IOLockSleep - both documented in IOKit/IOLocks.h as unsafe
  * at interrupt level.
  *
- * Scope is deliberately narrow: this driver only ever arms the one shared
- * hardware channel (kDWC2Channel, see BCM2837DWC2.h's fTransferLock
- * comment for why there is only one), so there is exactly one channel's
- * HCINT to check - no HAINT bit scan across multiple channels.
+ * Scans HAINT for every channel (DAR-370). Channel 0 is the synchronous
+ * path, and channels 1..fAsyncChannelCount carry parked async IN
+ * transfers. For those, the handler also pokes the UIM's
+ * IOInterruptEventSource: IOInterruptEventSource::interruptOccurred() is
+ * the primary-interrupt entry point of that class (it only bumps
+ * producerCount and signals the workloop), so it is safe to call here.
  */
 void
 BCM2837DWC2::interruptOccurred(OSObject *target, void * /*refCon*/, IOService * /*nub*/, int /*source*/)
@@ -179,28 +183,42 @@ BCM2837DWC2::interruptOccurred(OSObject *target, void * /*refCon*/, IOService * 
 		return;
 	}
 
-	uint32_t haint = self->regRead(kDWC2_HAINT);
-	if (!(haint & (1U << kDWC2Channel))) {
-		return;
+	uint32_t haint = self->regRead(kDWC2_HAINT) & self->regRead(kDWC2_HAINTMSK);
+	bool notifyAsync = false;
+
+	for (uint32_t chan = 0; chan < self->fNumChannels && chan < kDWC2MaxChannels; chan++) {
+		if (!(haint & (1U << chan))) {
+			continue;
+		}
+
+		uint32_t hcint = self->regRead(self->hcOffset(chan, kDWC2_HCINT));
+		if (hcint == 0) {
+			continue;
+		}
+
+		// Ack (W1C) exactly what was read, same reasoning as
+		// BCM2837SDHCI::interruptOccurred(): a blind full-register write
+		// risks clobbering a bit that arrived in the instant between the
+		// read above and this write.
+		self->regWrite(self->hcOffset(chan, kDWC2_HCINT), hcint);
+
+		IOInterruptState istate = IOSimpleLockLockDisableInterrupt(self->fStatusLock);
+		self->fPendingHcInt[chan] |= hcint;
+		self->fRealInterruptHits++;
+		IOSimpleLockUnlockEnableInterrupt(self->fStatusLock, istate);
+
+		IOLockWakeup(self->fInterruptLock, (void *)&self->fPendingHcInt[chan], false);
+
+		if (self->fAsyncBusy[chan]) {
+			self->fAsyncInterrupts++;
+			notifyAsync = true;
+		}
 	}
 
-	uint32_t hcint = self->regRead(self->hcOffset(kDWC2Channel, kDWC2_HCINT));
-	if (hcint == 0) {
-		return;
+	IOInterruptEventSource *notify = self->fAsyncNotify;
+	if (notifyAsync && notify != NULL) {
+		notify->interruptOccurred(NULL, NULL, 0);
 	}
-
-	// Ack (W1C) exactly what was read, same reasoning as
-	// BCM2837SDHCI::interruptOccurred(): a blind full-register write risks
-	// clobbering a bit that arrived in the instant between the read above
-	// and this write.
-	self->regWrite(self->hcOffset(kDWC2Channel, kDWC2_HCINT), hcint);
-
-	IOInterruptState istate = IOSimpleLockLockDisableInterrupt(self->fStatusLock);
-	self->fPendingHcInt |= hcint;
-	self->fRealInterruptHits++;
-	IOSimpleLockUnlockEnableInterrupt(self->fStatusLock, istate);
-
-	IOLockWakeup(self->fInterruptLock, (void *)&self->fPendingHcInt, false);
 }
 
 /*
@@ -228,10 +246,10 @@ BCM2837DWC2::waitForChannelInt(uint32_t chan, uint32_t mask, uint32_t timeoutMS,
 
 	for (;;) {
 		IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
-		if ((fPendingHcInt & mask) != 0) {
+		if ((fPendingHcInt[chan] & mask) != 0) {
 			matched = true;
-			observed = fPendingHcInt;
-			fPendingHcInt = 0;
+			observed = fPendingHcInt[chan];
+			fPendingHcInt[chan] = 0;
 		}
 		IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
 
@@ -243,17 +261,17 @@ BCM2837DWC2::waitForChannelInt(uint32_t chan, uint32_t mask, uint32_t timeoutMS,
 		// handling as interruptOccurred(). A real interrupt for the same
 		// event may race this read - harmless, since ack is idempotent
 		// (W1C) and both paths take fStatusLock before touching
-		// fPendingHcInt.
+		// fPendingHcInt[chan].
 		uint32_t raw = regRead(hcOffset(chan, kDWC2_HCINT));
 		if (raw != 0) {
 			regWrite(hcOffset(chan, kDWC2_HCINT), raw);
 			istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
-			fPendingHcInt |= raw;
+			fPendingHcInt[chan] |= raw;
 			fPollFallbackHits++;
-			if ((fPendingHcInt & mask) != 0) {
+			if ((fPendingHcInt[chan] & mask) != 0) {
 				matched = true;
-				observed = fPendingHcInt;
-				fPendingHcInt = 0;
+				observed = fPendingHcInt[chan];
+				fPendingHcInt[chan] = 0;
 			}
 			IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
 			if (matched) {
@@ -272,7 +290,7 @@ BCM2837DWC2::waitForChannelInt(uint32_t chan, uint32_t mask, uint32_t timeoutMS,
 
 		uint64_t pollDeadline;
 		clock_interval_to_deadline(kPollIntervalMS, kMillisecondScale, &pollDeadline);
-		IOLockSleepDeadline(fInterruptLock, (void *)&fPendingHcInt, pollDeadline, THREAD_UNINT);
+		IOLockSleepDeadline(fInterruptLock, (void *)&fPendingHcInt[chan], pollDeadline, THREAD_UNINT);
 		waitedMS += kPollIntervalMS;
 	}
 	IOLockUnlock(fInterruptLock);
@@ -436,6 +454,8 @@ BCM2837DWC2::coreInit(void)
 	 * per-transfer around doTransfer()'s own HCINT-clear, not here.
 	 */
 	regWrite(kDWC2_GINTMSK, kGINTSTS_HCHINT);
+	// Channel 0 only. Async channels add their own bit while they are
+	// parked (asyncStart()/asyncRelease()).
 	regWrite(kDWC2_HAINTMSK, 1U << kDWC2Channel);
 
 	// No HNP/SRP: forced host, nothing to negotiate.
@@ -708,7 +728,7 @@ BCM2837DWC2::allocateDMABuffer(void)
 #pragma mark - Transfer engine
 
 void
-BCM2837DWC2::channelInit(DWC2Endpoint *ep, bool isIn, bool useSplit)
+BCM2837DWC2::channelInit(uint32_t chan, DWC2Endpoint *ep, bool isIn, bool useSplit)
 {
 	uint32_t hcchar =
 	    ((uint32_t)ep->devAddr << kHCCHAR_DEVADDR_SHIFT) |
@@ -721,7 +741,7 @@ BCM2837DWC2::channelInit(DWC2Endpoint *ep, bool isIn, bool useSplit)
 		hcchar |= kHCCHAR_LSPDDEV;
 	}
 
-	regWrite(hcOffset(kDWC2Channel, kDWC2_HCCHAR), hcchar);
+	regWrite(hcOffset(chan, kDWC2_HCCHAR), hcchar);
 
 	/*
 	 * Split transactions. A full/low-speed device behind a high-speed hub
@@ -737,12 +757,12 @@ BCM2837DWC2::channelInit(DWC2Endpoint *ep, bool isIn, bool useSplit)
 	 * which issues split tokens and then never sends the matching CSPLIT.
 	 */
 	if (useSplit) {
-		regWrite(hcOffset(kDWC2Channel, kDWC2_HCSPLT),
+		regWrite(hcOffset(chan, kDWC2_HCSPLT),
 		    kHCSPLT_SPLTENA |
 		    ((uint32_t)ep->splitHubAddr << kHCSPLT_HUBADDR_SHIFT) |
 		    ((uint32_t)ep->splitHubPort << kHCSPLT_PRTADDR_SHIFT));
 	} else {
-		regWrite(hcOffset(kDWC2Channel, kDWC2_HCSPLT), 0);
+		regWrite(hcOffset(chan, kDWC2_HCSPLT), 0);
 	}
 }
 
@@ -852,7 +872,14 @@ BCM2837DWC2::haltChannel(uint32_t chan, uint32_t *hcintOut)
 			    kHaltWaitMS[attempt], attempt + 1, kHaltRetries, chan,
 			    regRead(hcOffset(chan, kDWC2_HCCHAR)), hcint);
 		}
-		if (!halted) {
+		if (!halted && chan != kDWC2Channel) {
+			// A parked async channel (DAR-370). Retire just that channel;
+			// channel 0 and the other async channels are unaffected.
+			fAsyncWedged[chan] = true;
+			IOLog("BCM2837DWC2: haltChannel: async channel %u CONFIRMED WEDGED "
+			      "(HCCHAR=%#x) - retired, no further transfers will use it\n",
+			    chan, regRead(hcOffset(chan, kDWC2_HCCHAR)));
+		} else if (!halted) {
 			fChannelWedged = true;
 			IOLog("BCM2837DWC2: haltChannel: channel %u CONFIRMED WEDGED after %u "
 			      "retries (HCCHAR=%#x) - every future transfer will fail immediately "
@@ -915,7 +942,21 @@ BCM2837DWC2::transferChunk(uint32_t xferLen, bool isIn, uint32_t *actualLen, uin
 		*hcintOut = hcint;
 	}
 
-	uint32_t hctsiz = regRead(hcOffset(kDWC2Channel, kDWC2_HCTSIZ));
+	return decodeChannelResult(kDWC2Channel, hcint, xferLen, isIn, actualLen);
+}
+
+/*
+ * Decode what a halted channel reports. Split out of transferChunk() for
+ * DAR-370 so the async path decodes a parked channel exactly the way the
+ * synchronous path does.
+ */
+IOReturn
+BCM2837DWC2::decodeChannelResult(uint32_t chan, uint32_t hcint, uint32_t xferLen,
+    bool isIn, uint32_t *actualLen)
+{
+	*actualLen = 0;
+
+	uint32_t hctsiz = regRead(hcOffset(chan, kDWC2_HCTSIZ));
 	uint32_t remaining = hctsiz & kHCTSIZ_XFERSIZE_MASK;
 
 	if (hcint & kHCINT_XFERCOMP) {
@@ -975,10 +1016,10 @@ BCM2837DWC2::transferChunk(uint32_t xferLen, bool isIn, uint32_t *actualLen, uin
 	} else if (hcint & kHCINT_DATATGLERR) {
 		reason = "DATATGLERR (data toggle mismatch)";
 	}
-	IOLog("BCM2837DWC2: transfer failed: %s (HCINT=%#x HCCHAR=%#x HCSPLT=%#x "
-	      "HCTSIZ=%#x xferLen=%u)\n",
-	    reason, hcint, regRead(hcOffset(kDWC2Channel, kDWC2_HCCHAR)),
-	    regRead(hcOffset(kDWC2Channel, kDWC2_HCSPLT)), hctsiz, xferLen);
+	IOLog("BCM2837DWC2: transfer failed on channel %u: %s (HCINT=%#x HCCHAR=%#x "
+	      "HCSPLT=%#x HCTSIZ=%#x xferLen=%u)\n",
+	    chan, reason, hcint, regRead(hcOffset(chan, kDWC2_HCCHAR)),
+	    regRead(hcOffset(chan, kDWC2_HCSPLT)), hctsiz, xferLen);
 
 	return kIOReturnIOError;
 }
@@ -1039,7 +1080,7 @@ BCM2837DWC2::doTransfer(DWC2Endpoint *ep, uint8_t *pid, bool isIn,
 		maxXferLen = ep->maxPacket;
 	}
 
-	channelInit(ep, isIn, doSplit);
+	channelInit(kDWC2Channel, ep, isIn, doSplit);
 
 	do {
 		uint32_t xferLen = len - done;
@@ -1374,6 +1415,286 @@ BCM2837DWC2::transferStage(DWC2Endpoint *ep, uint8_t *pid, bool isIn,
 	return ret;
 }
 
+#pragma mark - Parked asynchronous IN transfers (DAR-370)
+
+/*
+ * Same allocation recipe as allocateDMABuffer() (see its comment for the
+ * memory type, mapper and mask), sized for one kDWC2AsyncBufferSize slice
+ * per async channel. Failure is not fatal: with no buffer,
+ * fAsyncChannelCount stays 0 and every IN transfer uses channel 0 as
+ * before.
+ */
+bool
+BCM2837DWC2::allocateAsyncDMABuffer(void)
+{
+	const uint32_t size = kDWC2AsyncChannels * kDWC2AsyncBufferSize;
+
+	fAsyncDMABuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+	    kernel_task,
+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous |
+	    kIOMapWriteCombineCache | kIOMemoryMapperNone,
+	    size,
+	    0x3FFFFFFFULL & ~0x3ULL);
+	if (fAsyncDMABuffer == NULL) {
+		IOLog("BCM2837DWC2: async DMA buffer allocation failed - "
+		      "IN transfers stay on channel 0\n");
+		return false;
+	}
+	if (fAsyncDMABuffer->prepare() != kIOReturnSuccess) {
+		fAsyncDMABuffer->release();
+		fAsyncDMABuffer = NULL;
+		return false;
+	}
+
+	IOByteCount segLen = 0;
+	IOPhysicalAddress phys = fAsyncDMABuffer->getPhysicalSegment(0, &segLen, 0);
+	if (phys == 0 || segLen < size) {
+		IOLog("BCM2837DWC2: async DMA buffer not usable (phys=%#llx seglen=%llu)\n",
+		    (uint64_t)phys, (uint64_t)segLen);
+		fAsyncDMABuffer->complete();
+		fAsyncDMABuffer->release();
+		fAsyncDMABuffer = NULL;
+		return false;
+	}
+
+	fAsyncDMAVirt = (uint8_t *)fAsyncDMABuffer->getBytesNoCopy();
+	fAsyncDMABusAddr = kBCM2837BusAddressBase | (uint64_t)phys;
+	return true;
+}
+
+void
+BCM2837DWC2::setAsyncNotify(IOInterruptEventSource *source)
+{
+	fAsyncNotify = source;
+	__asm__ volatile ("dmb ish" ::: "memory");
+}
+
+bool
+BCM2837DWC2::asyncEligible(const DWC2Endpoint *ep, bool isIn) const
+{
+	if (ep == NULL || !isIn || fAsyncChannelCount == 0 || fChannelWedged) {
+		return false;
+	}
+	// Non-periodic only: a periodic channel halts on every NAK (see
+	// waitForChannelSettled()), so parking one would interrupt every
+	// (micro)frame. Control endpoints are driven stage by stage.
+	if (ep->epType != kHCCHAR_EPTYPE_BULK) {
+		return false;
+	}
+	// The same split decision doTransfer() makes. A split transfer needs
+	// its SSPLIT/CSPLIT state machine, which only runs there.
+	if (ep->speed != kUSBSpeedHigh && ep->splitHubAddr != 0 &&
+	    fRootSpeed == kUSBSpeedHigh) {
+		return false;
+	}
+	return ep->maxPacket != 0;
+}
+
+int
+BCM2837DWC2::asyncStart(DWC2Endpoint *ep, uint32_t len, uint32_t *xferLenOut)
+{
+	if (fRegBase == NULL || fAsyncDMAVirt == NULL || !asyncEligible(ep, true)) {
+		return -1;
+	}
+
+	uint32_t chan = 0;
+	for (uint32_t c = 1; c <= fAsyncChannelCount; c++) {
+		if (!fAsyncBusy[c] && !fAsyncWedged[c]) {
+			chan = c;
+			break;
+		}
+	}
+	if (chan == 0) {
+		return -1;
+	}
+
+	// Chunk sizing as doTransfer() does it: whole packets, bounded by the
+	// silicon's counters and by this channel's buffer slice.
+	uint32_t maxXferLen = kDWC2MaxPacketCount * ep->maxPacket;
+	if (maxXferLen > kDWC2MaxTransferSize) {
+		maxXferLen = kDWC2MaxTransferSize;
+	}
+	if (maxXferLen > kDWC2AsyncBufferSize) {
+		maxXferLen = kDWC2AsyncBufferSize;
+	}
+	maxXferLen = (maxXferLen / ep->maxPacket) * ep->maxPacket;
+	uint32_t xferLen = (len > maxXferLen) ? maxXferLen : len;
+	uint32_t numPackets = (xferLen > ep->maxPacket) ?
+	    (xferLen + ep->maxPacket - 1) / ep->maxPacket : 1;
+
+	channelInit(chan, ep, true, false);
+
+	regWrite(hcOffset(chan, kDWC2_HCTSIZ),
+	    (xferLen & kHCTSIZ_XFERSIZE_MASK) |
+	    (numPackets << kHCTSIZ_PKTCNT_SHIFT) |
+	    ((uint32_t)ep->toggle << kHCTSIZ_PID_SHIFT));
+	regWrite(hcOffset(chan, kDWC2_HCDMA),
+	    (uint32_t)(fAsyncDMABusAddr + (uint64_t)(chan - 1) * kDWC2AsyncBufferSize));
+	regWrite(hcOffset(chan, kDWC2_HCINT), kHCINT_ALL);
+
+	IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
+	fPendingHcInt[chan] = 0;
+	IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+
+	fAsyncLen[chan] = xferLen;
+	*xferLenOut = xferLen;
+	fAsyncBusy[chan] = true;
+	fAsyncStarts++;
+
+	// CHHLTD only: a NAK must not interrupt (see the header), and in
+	// buffer-DMA mode every other outcome - XFERCOMP, STALL, the errors -
+	// halts the channel and so arrives as CHHLTD with its cause alongside.
+	regWrite(hcOffset(chan, kDWC2_HCINTMSK), kHCINT_CHHLTD);
+	regModify(kDWC2_HAINTMSK, 0, 1U << chan);
+
+	// Same ordering requirement as doTransfer(): everything above must be
+	// visible to the core, and fAsyncBusy to interruptOccurred(), before
+	// the channel is enabled.
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	regModify(hcOffset(chan, kDWC2_HCCHAR),
+	    kHCCHAR_MULTICNT_MASK | kHCCHAR_CHEN | kHCCHAR_CHDIS | kHCCHAR_ODDFRM,
+	    (1U << kHCCHAR_MULTICNT_SHIFT) | kHCCHAR_CHEN);
+
+	return (int)chan;
+}
+
+void
+BCM2837DWC2::asyncRelease(uint32_t chan)
+{
+	regWrite(hcOffset(chan, kDWC2_HCINTMSK), 0);
+	regModify(kDWC2_HAINTMSK, 1U << chan, 0);
+	regWrite(hcOffset(chan, kDWC2_HCINT), kHCINT_ALL);
+
+	IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
+	fPendingHcInt[chan] = 0;
+	IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+
+	__asm__ volatile ("dmb ish" ::: "memory");
+	fAsyncBusy[chan] = false;
+}
+
+/*
+ * The channel has halted. Decode it, copy out what arrived, carry the data
+ * toggle forward and free the channel.
+ */
+IOReturn
+BCM2837DWC2::asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
+    void *dst, uint32_t dstLen, uint32_t *actualLen)
+{
+	uint32_t xferLen = fAsyncLen[chan];
+	uint32_t actual = 0;
+	IOReturn ret;
+
+	const uint32_t kOutcomeBits = kHCINT_XFERCOMP | kHCINT_STALL | kHCINT_XACTERR |
+	    kHCINT_BBLERR | kHCINT_AHBERR | kHCINT_DATATGLERR | kHCINT_FRMOVRUN;
+	if (hcint & kOutcomeBits) {
+		ret = decodeChannelResult(chan, hcint, xferLen, true, &actual);
+	} else {
+		// A halt with no outcome of its own: asyncAbort() took the
+		// channel down. That is not a failure worth decoding.
+		ret = kIOReturnAborted;
+	}
+
+	if (ret != kIOReturnSuccess) {
+		// Packets that arrived before an abort or error are real and
+		// already acknowledged, so count them from HCTSIZ the same way
+		// decodeChannelResult() does for a completed IN.
+		uint32_t remaining = regRead(hcOffset(chan, kDWC2_HCTSIZ)) & kHCTSIZ_XFERSIZE_MASK;
+		actual = (remaining <= xferLen) ? (xferLen - remaining) : 0;
+	}
+
+	if (actual > dstLen) {
+		IOLog("BCM2837DWC2: async channel %u delivered %u bytes into a %u byte "
+		      "buffer - truncated\n", chan, actual, dstLen);
+		actual = dstLen;
+		if (ret == kIOReturnSuccess) {
+			ret = kIOReturnOverrun;
+		}
+	}
+	if (actual > 0) {
+		__asm__ volatile ("dsb sy" ::: "memory");
+		memcpy(dst, fAsyncDMAVirt + (chan - 1) * kDWC2AsyncBufferSize, actual);
+	}
+
+	// HCTSIZ.PID is the toggle the core expects next, whatever happened:
+	// unchanged if nothing arrived, advanced past every packet that did.
+	// doTransfer() takes it the same way.
+	uint32_t hctsiz = regRead(hcOffset(chan, kDWC2_HCTSIZ));
+	ep->toggle = (uint8_t)((hctsiz & kHCTSIZ_PID_MASK) >> kHCTSIZ_PID_SHIFT);
+
+	asyncRelease(chan);
+
+	*actualLen = actual;
+	return ret;
+}
+
+bool
+BCM2837DWC2::asyncCollect(int chanIn, DWC2Endpoint *ep, void *dst, uint32_t dstLen,
+    uint32_t *actualLen, IOReturn *status)
+{
+	*actualLen = 0;
+	if (chanIn <= 0 || (uint32_t)chanIn > fAsyncChannelCount || !fAsyncBusy[chanIn]) {
+		*status = kIOReturnBadArgument;
+		return true;
+	}
+	uint32_t chan = (uint32_t)chanIn;
+
+	// Take what the interrupt handler recorded, plus anything still in the
+	// register. The register read is the same poll fallback
+	// waitForChannelInt() keeps for channel 0: a missed interrupt must
+	// delay a completion, not lose it.
+	uint32_t raw = regRead(hcOffset(chan, kDWC2_HCINT));
+	if (raw != 0) {
+		regWrite(hcOffset(chan, kDWC2_HCINT), raw);
+	}
+	IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
+	fPendingHcInt[chan] |= raw;
+	uint32_t hcint = fPendingHcInt[chan];
+	if (hcint & kHCINT_CHHLTD) {
+		fPendingHcInt[chan] = 0;
+	}
+	IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+
+	if (!(hcint & kHCINT_CHHLTD)) {
+		return false;
+	}
+
+	*status = asyncFinish(chan, ep, hcint, dst, dstLen, actualLen);
+	return true;
+}
+
+IOReturn
+BCM2837DWC2::asyncAbort(int chanIn, DWC2Endpoint *ep, void *dst, uint32_t dstLen,
+    uint32_t *actualLen)
+{
+	*actualLen = 0;
+	if (chanIn <= 0 || (uint32_t)chanIn > fAsyncChannelCount || !fAsyncBusy[chanIn]) {
+		return kIOReturnBadArgument;
+	}
+	uint32_t chan = (uint32_t)chanIn;
+
+	uint32_t hcint = 0;
+	haltChannel(chan, &hcint);
+
+	IOInterruptState istate = IOSimpleLockLockDisableInterrupt(fStatusLock);
+	hcint |= fPendingHcInt[chan];
+	fPendingHcInt[chan] = 0;
+	IOSimpleLockUnlockEnableInterrupt(fStatusLock, istate);
+
+	if (fAsyncWedged[chan]) {
+		// haltChannel() gave up on it. Free the bookkeeping, not the
+		// channel: fAsyncWedged keeps asyncStart() away from it for good.
+		ep->toggle = (uint8_t)((regRead(hcOffset(chan, kDWC2_HCTSIZ)) &
+		    kHCTSIZ_PID_MASK) >> kHCTSIZ_PID_SHIFT);
+		asyncRelease(chan);
+		return kIOReturnNotResponding;
+	}
+
+	IOReturn ret = asyncFinish(chan, ep, hcint, dst, dstLen, actualLen);
+	return (ret == kIOReturnSuccess) ? kIOReturnSuccess : kIOReturnAborted;
+}
+
 uint32_t
 BCM2837DWC2::frameNumber(void) const
 {
@@ -1546,6 +1867,19 @@ BCM2837DWC2::start(IOService *provider)
 		return false;
 	}
 	IOLog("BCM2837DWC2: core init done, %u host channels\n", fNumChannels);
+
+	// DAR-370: lend channels 1..N to parked async IN transfers.
+	fAsyncChannelCount = 0;
+	if (allocateAsyncDMABuffer()) {
+		uint32_t spare = (fNumChannels > 1) ? fNumChannels - 1 : 0;
+		fAsyncChannelCount = (spare < kDWC2AsyncChannels) ? spare : kDWC2AsyncChannels;
+		int noAsync = 0;
+		if (PE_parse_boot_argn("dwc2-no-async", &noAsync, sizeof(noAsync))) {
+			fAsyncChannelCount = 0;
+		}
+	}
+	IOLog("BCM2837DWC2: %u channel(s) for parked async IN transfers\n",
+	    fAsyncChannelCount);
 
 	if (!hostInit()) {
 		IOLog("BCM2837DWC2: host init failed\n");
@@ -2030,6 +2364,12 @@ BCM2837DWC2::free(void)
 		fDMABuffer->release();
 		fDMABuffer = NULL;
 	}
+	if (fAsyncDMABuffer != NULL) {
+		fAsyncDMABuffer->complete();
+		fAsyncDMABuffer->release();
+		fAsyncDMABuffer = NULL;
+	}
+	fAsyncDMAVirt = NULL;
 	fDMAVirt = NULL;
 	if (fRegMap != NULL) {
 		fRegMap->release();

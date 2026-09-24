@@ -2083,18 +2083,29 @@ BCM2837USBHostController::purgeAddressGated(OSObject *owner, void *arg0, void *,
 		}
 		ep->retired = true;
 		me->collectAsync(ep, true);
-		me->returnTransfers(ep, kIOReturnAborted);
+		// The status UIMDeleteEndpoint() returns transfers with.
+		me->returnTransfers(ep, kIOUSBTransactionReturned);
+	}
+	// Free them now if nothing up the stack can hold one (the engine
+	// may be parked, so its next pass could be a long way off).
+	if (!me->fInEngine) {
+		me->reapRetiredEndpoints();
 	}
 	return kIOReturnSuccess;
+}
+
+void
+BCM2837USBHostController::DetachAddress(UInt8 address)
+{
+	fDWC2->detachDevice(address);
 }
 
 IOReturn
 BCM2837USBHostController::ReEnumerateAddress(UInt8 address, bool extraResetDelay)
 {
-	// Nothing may address the old device from here on: detach it in the
-	// table first (so createEndpoint() cannot recreate an endpoint for it),
-	// then retire whatever the UIM still has open for it.
-	fDWC2->detachDevice(address);
+	// The old device was detached (DetachAddress()) before it was torn down,
+	// so createEndpoint() could not recreate an endpoint for it meanwhile.
+	// Retire whatever the UIM still has open for it.
 	if (_commandGate != NULL) {
 		_commandGate->runAction(purgeAddressGated, (void *)(uintptr_t)address);
 	}
@@ -2105,8 +2116,12 @@ BCM2837USBHostController::ReEnumerateAddress(UInt8 address, bool extraResetDelay
 		return (ret != kIOReturnSuccess) ? ret : kIOReturnNoDevice;
 	}
 	if (!fDWC2->publishable(dev)) {
-		// Came back as something boot would not have published either.
-		return kIOReturnSuccess;
+		// Came back as something boot would not have published either (a
+		// hub, or the SMSC9514Ethernet function). The old nub is gone and
+		// nothing replaces it: report that, not success.
+		IOLog("BCM2837USBHostController: device %u came back unpublishable, "
+		    "not republished\n", address);
+		return kIOReturnUnsupported;
 	}
 	IOLog("BCM2837USBHostController: re-enumerated device %u, publishing it again\n",
 	    address);
@@ -2128,7 +2143,8 @@ BCM2837USBHostController::reenumTestFired(thread_call_param_t owner, thread_call
 			OSObject *obj;
 			while ((obj = it->getNextObject()) != NULL) {
 				IOUSBDevice *d = OSDynamicCast(IOUSBDevice, obj);
-				if (d != NULL && d->GetAddress() == address) {
+				if (d != NULL && OSDynamicCast(IOUSBRootHubDevice, obj) == NULL &&
+				    d->GetAddress() == address) {
 					target = d;
 					target->retain();
 					break;
@@ -2202,9 +2218,13 @@ BCM2837USBPortPolicy::SuspendPort(UInt32 portNum, bool suspend)
 	 * the caller's own next request would.
 	 */
 	IOReturn status = kIOReturnSuccess;
-	fDevice->retain();
-	fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
-	fDevice->release();
+	IOUSBDevice *device = fDevice;
+	if (device == NULL) {
+		return kIOReturnNoDevice;    // being re-enumerated
+	}
+	device->retain();
+	device->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
+	device->release();
 
 	return kIOReturnUnsupported;
 }
@@ -2239,12 +2259,30 @@ BCM2837USBPortPolicy::ReEnumeratePort(UInt32 portNum, UInt32 options)
 #pragma unused (portNum)
 	IOUSBDevice *old = fDevice;
 	BCM2837USBHostController *controller = fController;
+	if (old == NULL || controller->isInactive()) {
+		// AppleUSBHubPort::ReEnumeratePort() starts the same way
+		// (AppleUSBHubPort.cpp:1381-1384, "if ( IsInactive() ) return
+		// kIOReturnNotPermitted").
+		return kIOReturnNotPermitted;
+	}
 	UInt8 address = old->GetAddress();
 
 	// Terminating the device finalizes it, and its finalize() releases its
 	// hub parent - this object. Keep both alive until this returns.
 	retain();
 	old->retain();
+
+	// Detach the address in the device table before tearing the driver
+	// down. A driver that re-queues a transfer from its "returned"
+	// completion during teardown then gets kIOUSBEndpointNotFound, instead
+	// of a new endpoint whose completion would later be delivered to the
+	// freed driver.
+	controller->DetachAddress(address);
+
+	// Like RemoveDevice() NULLing _portDevice (AppleUSBHubPort.cpp:1082-
+	// 1086): once removal starts, this port has no device, so nothing here
+	// dereferences the old one after it may have been freed.
+	fDevice = NULL;
 
 	// RemoveDevice(), AppleUSBHubPort.cpp:1074-1150.
 	const IORegistryPlane *usbPlane = old->getPlane(kIOUSBPlane);

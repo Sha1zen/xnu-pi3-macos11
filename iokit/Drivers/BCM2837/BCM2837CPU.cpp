@@ -1,4 +1,5 @@
 #include "BCM2837CPU.h"
+#include "BCM2837LocalIntc.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -171,8 +172,15 @@ BCM2837CPU::initCPU(bool boot)
 	 * signal this one. But a self-xcall (SIGPxcall/SIGPxcallImm) did check
 	 * it (cpu_common.c:430-435) and failed with KERN_FAILURE. It now
 	 * succeeds, so it must actually be delivered: see signalCPU() below.
+	 *
+	 * This one direct call is fine where signalCPU()'s would not be: it is
+	 * made once, from this CPU's own bring-up, not from inside a sender,
+	 * and there is nothing pending for it to run.
 	 */
 	if (ipi_handler != NULL) {
+		// IPIs arrive through core 0's mailbox 0; see signalCPU().
+		BCM2837LocalIntc::setIPIHandler(ipi_handler);
+
 		boolean_t istate = ml_set_interrupts_enabled(FALSE);
 		ipi_handler();
 		ml_set_interrupts_enabled(istate);
@@ -380,23 +388,28 @@ BCM2837CPU::free(void)
 }
 
 /*
- * DAR-375. IOCPU::signalCPU() is a no-op (iokit/Kernel/IOCPU.cpp:461); a real
- * Apple CPU class sends an IPI. The only CPU this class ever runs is the boot
- * CPU (cpu1-3 are parked), so the only signal it can be asked to send is one
- * to itself, and cpu_signal_internal() has already posted the signal bits and
- * xcall arguments before calling PE_cpu_signal() -> here
- * (osfmk/arm/cpu_common.c:429-498). Deliver that self-IPI by running the IPI
- * handler (cpu_signal_handler) now, with interrupts off as a real IPI would.
- * Without this, a self-xcall that succeeds now that SIGPdisabled is clear
- * (see initCPU()) would sit pending with nothing to run it.
+ * DAR-375. IOCPU::signalCPU() is a no-op (iokit/Kernel/IOCPU.cpp:460-463); a
+ * real Apple CPU class sends an IPI. The only CPU this class runs is the boot
+ * CPU (cpu1-3 are parked), so the only IPI it is ever asked for is one to
+ * itself: cpu_signal_internal() has posted the signal bits and xcall
+ * arguments and then called PE_cpu_signal() -> here
+ * (osfmk/arm/cpu_common.c:429-498). Raise a real IPI through core 0's
+ * mailbox 0 (BCM2837LocalIntc::sendIPI()). It is taken as an IRQ once this
+ * CPU unmasks IRQs, and BCM2837LocalIntc runs the IPI handler from
+ * interrupt context, as a real IPI would.
+ *
+ * Not called inline. An earlier version of this fix ran the handler right
+ * here, inside the sender. That runs a pended decrementer or an xcall in
+ * the middle of whatever posted it, which XNU never expects. While that
+ * version was in, one boot in about six panicked "RootDomain: not inside PM
+ * gate" on the PM workloop, a panic not seen in ~30 boots before it.
+ * Consistent with, though not proven to be, that inline delivery.
  */
 void
 BCM2837CPU::signalCPU(IOCPU *target)
 {
-	if (target != this || ipi_handler == NULL) {
+	if (target != this) {
 		return;
 	}
-	boolean_t istate = ml_set_interrupts_enabled(FALSE);
-	ipi_handler();
-	ml_set_interrupts_enabled(istate);
+	BCM2837LocalIntc::sendIPI();
 }

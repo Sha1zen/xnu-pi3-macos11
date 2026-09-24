@@ -973,6 +973,7 @@ private:
 	bool resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speed,
 	                  uint8_t *splitHubAddr, uint8_t *splitHubPort);
 	DWC2USBDevice *deviceByAddress(uint8_t address);
+	DWC2USBDevice *slotForAddress(uint8_t address, bool includeDetached);
 };
 
 #endif /* _BCM2837_DWC2_H */

@@ -51,26 +51,29 @@ BCM2837DWC2::findDeviceByInterfaceClass(uint8_t interfaceClass) const
 	return NULL;
 }
 
+// The table entry at `address`: in use only, or also one detached for
+// re-enumeration (its slot keeps the address).
 DWC2USBDevice *
-BCM2837DWC2::deviceByAddress(uint8_t address)
+BCM2837DWC2::slotForAddress(uint8_t address, bool includeDetached)
 {
 	for (uint32_t i = 0; i < fNumDevices; i++) {
-		if (fDevices[i].inUse && fDevices[i].address == address) {
+		if (fDevices[i].address == address && (includeDetached || fDevices[i].inUse)) {
 			return &fDevices[i];
 		}
 	}
 	return NULL;
 }
 
+DWC2USBDevice *
+BCM2837DWC2::deviceByAddress(uint8_t address)
+{
+	return slotForAddress(address, false);
+}
+
 const DWC2USBDevice *
 BCM2837DWC2::findDevice(uint8_t address) const
 {
-	for (uint32_t i = 0; i < fNumDevices; i++) {
-		if (fDevices[i].inUse && fDevices[i].address == address) {
-			return &fDevices[i];
-		}
-	}
-	return NULL;
+	return const_cast<BCM2837DWC2 *>(this)->slotForAddress(address, false);
 }
 
 /*
@@ -117,15 +120,7 @@ BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
 {
 	*devOut = NULL;
 
-	// The slot keeps its address while detached, so look it up regardless
-	// of inUse.
-	DWC2USBDevice *dev = NULL;
-	for (uint32_t i = 0; i < fNumDevices; i++) {
-		if (fDevices[i].address == address) {
-			dev = &fDevices[i];
-			break;
-		}
-	}
+	DWC2USBDevice *dev = slotForAddress(address, true);
 	if (dev == NULL) {
 		return kIOReturnNoDevice;
 	}
@@ -142,14 +137,27 @@ BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
 	dev->inUse = false;
 
 	IOReturn ret = kIOReturnNotResponding;
-	// AppleUSBHubPort retries a failed add rather than giving up on the
-	// first transient error; three attempts, as doTransfer() gives XACTERR.
+	/*
+	 * Retry rather than give up on the first transient error, as
+	 * AppleUSBHubPort::AddDevice() does (its reset loop,
+	 * AppleUSBHubPort.cpp:855-869; and up to kMaxDevZeroRetries = 4
+	 * address-0 descriptor reads, :63, :3800). The count of three here is
+	 * this driver's own, the same one doTransfer() uses for XACTERR; it is
+	 * not Apple's number.
+	 */
 	for (int attempt = 0; attempt < 3 && ret != kIOReturnSuccess; attempt++) {
 		uint8_t speed = kUSBSpeedFull;
 		uint8_t splitHubAddr = 0, splitHubPort = 0;
 		if (parentHubAddr == 0) {
-			// On the root port. Resetting it resets the whole bus, so keep
-			// channel 0's synchronous transfers out of the way.
+			// On the root port. Nothing to do if nothing is connected
+			// (AppleUSBHubPort::AddDevice checks the same,
+			// AppleUSBHubPort.cpp:741-751). Resetting the root port resets
+			// the whole bus, so channel 0's synchronous transfers are held
+			// off for its duration (portReset() sleeps ~90 ms).
+			if (!(regRead(kDWC2_HPRT0) & kHPRT0_PRTCONNSTS)) {
+				ret = kIOReturnNoDevice;
+				break;
+			}
 			IOLockLock(fTransferLock);
 			bool ok = portReset();
 			IOLockUnlock(fTransferLock);
@@ -179,6 +187,18 @@ BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
 		} else {
 			IOLog("BCM2837DWC2: re-enumeration of device %u (hub %u port %u), "
 			    "attempt %d/3 failed\n", address, parentHubAddr, parentPort, attempt + 1);
+		}
+	}
+	if (ret != kIOReturnSuccess && parentHubAddr != 0) {
+		/*
+		 * The device may be left answering at address 0 on an enabled port,
+		 * where it would collide with the next device reset. Disable the
+		 * port before releasing the lock, as AppleUSBHubPort::AddDevice()
+		 * does on failure (AppleUSBHubPort.cpp:880-889).
+		 */
+		DWC2USBDevice *hub = deviceByAddress(parentHubAddr);
+		if (hub != NULL) {
+			hubClearPortFeature(hub, parentPort, kHubFeatPortEnable);
 		}
 	}
 	IOLockUnlock(fEnumLock);

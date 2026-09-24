@@ -67,6 +67,35 @@ BCM2837LocalIntc::init(OSDictionary *propTable)
 	return true;
 }
 
+BCM2837LocalIntc *BCM2837LocalIntc::sInstance = NULL;
+void (*BCM2837LocalIntc::sIPIHandler)(void) = NULL;
+
+void
+BCM2837LocalIntc::setIPIHandler(void (*handler)(void))
+{
+	sIPIHandler = handler;
+	OSMemoryBarrier();
+}
+
+/*
+ * Raise core 0's mailbox 0. The IRQ it produces is taken like any other,
+ * when the CPU next has IRQs unmasked, which is what makes it an IPI and not
+ * a function call: XNU relies on a signal a CPU posts to itself (for
+ * example a decrementer pended as SIGPdec because it cannot be serviced
+ * right now) being handled later, from interrupt context.
+ */
+bool
+BCM2837LocalIntc::sendIPI(void)
+{
+	BCM2837LocalIntc *me = sInstance;
+	if (me == NULL || me->fRegBase == NULL) {
+		return false;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	me->fRegBase[kRegMailbox0Set0] = 1;
+	return true;
+}
+
 bool
 BCM2837LocalIntc::start(IOService *provider)
 {
@@ -84,7 +113,7 @@ BCM2837LocalIntc::start(IOService *provider)
 	// before trusting it - "local-intc"'s own reg property declares 0x100
 	// bytes, so this should always pass; catches a misconfigured DT rather
 	// than a runtime condition.
-	if (fRegMap->getLength() < (kRegIRQPending0 * sizeof(uint32_t)) + sizeof(uint32_t)) {
+	if (fRegMap->getLength() < (kRegMailbox0Clr0 * sizeof(uint32_t)) + sizeof(uint32_t)) {
 		IOLog("BCM2837LocalIntc: \"local-intc\" register mapping too small (%llu bytes)\n",
 		    (unsigned long long)fRegMap->getLength());
 		fRegMap->release();
@@ -122,6 +151,13 @@ BCM2837LocalIntc::start(IOService *provider)
 	// the exact "unhandled pending bit, no way to clear it" spin
 	// backlog item 2 just added a diagnostic latch for).
 	fRegBase[kRegTimerControl0] = 0xF0;
+
+	// DAR-375: core 0 mailbox 0 as its IPI. Clear anything stale, then
+	// enable its IRQ (bit 0; FIQ bits 4-7 left clear). The mapping-size
+	// check above covers 0x64; these reach 0xC4, still inside the node's
+	// 0x100 bytes.
+	fRegBase[kRegMailbox0Clr0] = 0xFFFFFFFF;
+	fRegBase[kRegMailboxControl0] = 0x1;
 
 	const OSSymbol *controllerName = IODTInterruptControllerName(provider);
 	if (controllerName == NULL) {
@@ -171,6 +207,11 @@ BCM2837LocalIntc::start(IOService *provider)
 	IOLog("BCM2837LocalIntc: started, base=%p, registered as \"%s\"\n",
 	    (void *)fRegBase, controllerName->getCStringNoCopy());
 	controllerName->release();
+
+	// Live now: take IPIs, and deliver any signal posted before we were.
+	OSMemoryBarrier();
+	sInstance = this;
+	sendIPI();
 
 	return true;
 }
@@ -223,6 +264,20 @@ BCM2837LocalIntc::handleInterrupt(void * /*refCon*/, IOService * /*nub*/, int /*
 {
 	uint32_t pending0 = fRegBase[kRegIRQPending0];
 
+	if (pending0 & (1U << kVectorMailbox0)) {
+		// DAR-375 IPI. Acknowledge before running the handler, so a signal
+		// posted while it runs raises a fresh one rather than being lost
+		// (the same ordering sleh.c keeps for Apple's fast IPIs,
+		// osfmk/arm64/sleh.c:1833-1844).
+		uint32_t mbox = fRegBase[kRegMailbox0Clr0];
+		fRegBase[kRegMailbox0Clr0] = mbox;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		void (*handler)(void) = sIPIHandler;
+		if (handler != NULL) {
+			handler();
+		}
+	}
+
 	if (pending0 & (1U << kVectorGPUIRQ)) {
 		IOInterruptVector *vector = &vectors[kVectorGPUIRQ];
 		vector->interruptActive = 1;
@@ -263,7 +318,7 @@ BCM2837LocalIntc::handleInterrupt(void * /*refCon*/, IOService * /*nub*/, int /*
 	// timer source handling is out of scope here (see docs/backlog.md
 	// item 3 for the related, separate LOCAL_TIMER_INT_CONTROL0
 	// question).
-	uint32_t unexpected = pending0 & ~(1U << kVectorGPUIRQ);
+	uint32_t unexpected = pending0 & ~((1U << kVectorGPUIRQ) | (1U << kVectorMailbox0));
 	if (unexpected != 0 && !fLoggedUnexpectedPending) {
 		fLoggedUnexpectedPending = true;
 		fLastUnexpectedPending = unexpected;

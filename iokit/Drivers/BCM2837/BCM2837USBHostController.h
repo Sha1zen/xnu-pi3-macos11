@@ -321,6 +321,9 @@ public:
 	 * already terminated the old nub.
 	 */
 	IOReturn	ReEnumerateAddress(UInt8 address, bool extraResetDelay);
+	// The first step of re-enumeration: mark the address gone in
+	// BCM2837DWC2's table before the old IOUSBDevice is torn down.
+	void		DetachAddress(UInt8 address);
 
 	// ---------------- UIM: initialisation ----------------
 	virtual IOReturn	UIMInitialize(IOService *provider) override;

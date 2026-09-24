@@ -2002,7 +2002,7 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	// The hub side of this device's port (DAR-372; see BCM2837USBPortPolicy).
 	// Before registerService(), so no driver can match and suspend the
 	// device before its hub parent exists.
-	BCM2837USBPortPolicy *policy = BCM2837USBPortPolicy::withDevice(fDWC2, nub, dev->address);
+	BCM2837USBPortPolicy *policy = BCM2837USBPortPolicy::withDevice(nub);
 	if (policy != NULL) {
 		nub->SetHubParent(policy);      // retains it
 		policy->release();
@@ -2033,7 +2033,7 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 #pragma mark - BCM2837USBPortPolicy (DAR-372)
 
 BCM2837USBPortPolicy *
-BCM2837USBPortPolicy::withDevice(BCM2837DWC2 *dwc2, IOUSBDevice *device, uint8_t address)
+BCM2837USBPortPolicy::withDevice(IOUSBDevice *device)
 {
 	BCM2837USBPortPolicy *me = new BCM2837USBPortPolicy;
 	if (me == NULL) {
@@ -2043,10 +2043,30 @@ BCM2837USBPortPolicy::withDevice(BCM2837DWC2 *dwc2, IOUSBDevice *device, uint8_t
 		me->release();
 		return NULL;
 	}
-	me->fDWC2 = dwc2;
 	me->fDevice = device;
-	me->fAddress = address;
+	me->fResumedLock = IOLockAlloc();
+	me->fResumedCall = thread_call_allocate(deliverResumed, me);
+	if (me->fResumedLock == NULL || me->fResumedCall == NULL) {
+		me->release();
+		return NULL;
+	}
 	return me;
+}
+
+void
+BCM2837USBPortPolicy::free(void)
+{
+	// Nothing can be pending: every delivery holds a reference to this
+	// object until it has finished (deliverResumed()).
+	if (fResumedCall != NULL) {
+		thread_call_free(fResumedCall);
+		fResumedCall = NULL;
+	}
+	if (fResumedLock != NULL) {
+		IOLockFree(fResumedLock);
+		fResumedLock = NULL;
+	}
+	IOUSBHubPolicyMaker::free();
 }
 
 // Never started, so neither of these is ever called; they are pure in the
@@ -2064,22 +2084,65 @@ BCM2837USBPortPolicy::HubPowerChange(unsigned long powerStateOrdinal)
 	return kIOReturnUnsupported;
 }
 
+void
+BCM2837USBPortPolicy::deliverResumed(thread_call_param_t owner, thread_call_param_t)
+{
+	BCM2837USBPortPolicy *me = (BCM2837USBPortPolicy *)owner;
+
+	IOReturn status = kIOReturnSuccess;
+	me->fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
+
+	IOLockLock(me->fResumedLock);
+	me->fResumedDone = true;
+	IOLockWakeup(me->fResumedLock, &me->fResumedDone, false);
+	IOLockUnlock(me->fResumedLock);
+
+	// Dropped last, after the unlock: until then this object (and the lock
+	// just released) must outlive a caller that has already woken up and
+	// returned. thread_call_free() in free() copes with the call still
+	// finishing (osfmk/kern/thread_call.c thread_call_free(), tc_refs).
+	me->release();
+}
+
 IOReturn
 BCM2837USBPortPolicy::SuspendPort(UInt32 portNum, bool suspend)
 {
 #pragma unused (portNum)
-	bool wasSuspended = false;
-	IOReturn status = fDWC2->hubPortSuspend(fAddress, suspend, &wasSuspended);
-
-	if (!suspend && status == kIOReturnSuccess) {
-		if (!wasSuspended) {
-			return kIOUSBDevicePortWasNotSuspended;
-		}
-		fDevice->retain();
-		fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
-		fDevice->release();
+	if (!suspend) {
+		return kIOUSBDevicePortWasNotSuspended;
 	}
-	return status;
+
+	// See the header: the port stays up, and clients are told so the way
+	// AppleUSBHub tells them, from another thread while this caller waits.
+	IOLockLock(fResumedLock);
+	fResumedDone = false;
+	fDevice->retain();
+	retain();                       // released by deliverResumed()
+	thread_call_enter(fResumedCall);
+	while (!fResumedDone) {
+		IOLockSleep(fResumedLock, &fResumedDone, THREAD_UNINT);
+	}
+	fDevice->release();
+	IOLockUnlock(fResumedLock);
+
+	return kIOReturnUnsupported;
+}
+
+IOReturn
+BCM2837USBPortPolicy::ResetPort(UInt32 portNum)
+{
+#pragma unused (portNum)
+	return kIOReturnSuccess;
+}
+
+IOReturn
+BCM2837USBPortPolicy::GetPortInformation(UInt32 portNum, UInt32 *info)
+{
+#pragma unused (portNum)
+	if (info != NULL) {
+		*info = 0;
+	}
+	return kIOReturnNoDevice;
 }
 
 UInt32

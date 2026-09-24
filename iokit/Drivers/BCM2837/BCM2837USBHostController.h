@@ -193,23 +193,55 @@ struct DWC2UIMEndpoint
  * (AppleUSBCDCECMData.cpp:2812-2819). Without that message, en0 stayed dead
  * after `ifconfig en0 down; ifconfig en0 up`.
  *
- * This object does what AppleUSBHubPort does for that path and nothing
- * else:
- *   SuspendPort()  a real hub-port suspend/resume
- *                  (BCM2837DWC2::hubPortSuspend()). A resume that
- *                  completes messages the device's clients
- *                  kIOUSBMessagePortHasBeenResumed synchronously, as
- *                  AppleUSBHubPort::MessageDeviceClients() does after the
- *                  resume handler (AppleUSBHubPort.cpp:1258-1266, :2812).
- *                  Resuming a port that is not suspended gives
- *                  kIOUSBDevicePortWasNotSuspended (:1344-1351).
- *   Request/ReturnExtraPower  the base class dereferences _device, the
- *                  hub's own IOUSBHubDevice, which does not exist here.
- *                  These return exactly what IOUSBDevice computes with no
- *                  hub parent: 0 mA, and success.
- * Everything else keeps the base class's kIOReturnUnsupported. The one
- * behaviour change is IOUSBDevice::ResetDevice(): it now reports
- * unsupported instead of a success for a reset that never happened.
+ * Selective suspend is not implemented: the port is never suspended on the
+ * bus. Actually suspending it would need the UIM to stop polling the
+ * device's endpoints first, because a hub does not forward tokens to a
+ * suspended port. So this object answers the way AppleUSBHub itself does
+ * when a suspend request did not leave the port suspended: it tells the
+ * device's clients kIOUSBMessagePortHasBeenResumed
+ * (third_party/IOUSBFamily/AppleUSBHub/Classes/AppleUSBHub.cpp:3515-3522,
+ * "we are not suspended ... let our clients know ... by sending a
+ * kIOUSBMessagePortHasBeenResumed message").
+ *
+ *   SuspendPort(true)   returns kIOReturnUnsupported, so IOUSBDevice tells
+ *                       clients kIOUSBMessagePortWasNotSuspended (the true
+ *                       answer), and delivers kIOUSBMessagePortHasBeenResumed
+ *                       as above. AppleUSBHubPort delivers its resume message
+ *                       from the hub's own thread while SuspendPort's caller
+ *                       waits (AppleUSBHubPort.cpp:1258-1266, :2812). This
+ *                       does the same: a thread call, and the caller blocks
+ *                       until it has run. Clients are never re-entered on the
+ *                       caller's thread.
+ *   SuspendPort(false)  the port is not suspended, so
+ *                       kIOUSBDevicePortWasNotSuspended, as AppleUSBHubPort
+ *                       answers (AppleUSBHubPort.cpp:1344-1351).
+ *
+ * Installing a hub parent also routes IOUSBDevice's other port operations
+ * here. Each keeps the result it had with no hub parent:
+ *   ResetPort           kIOReturnSuccess. With no parent,
+ *                       IOUSBDevice::_ResetDevice() skipped the port reset
+ *                       and still returned success, recreated pipe zero and
+ *                       sent kIOUSBMessagePortHasBeenReset
+ *                       (IOUSBDevice.cpp:1347-1418). With this parent it does
+ *                       the same, except that pipe zero is now aborted and
+ *                       closed before being recreated, not overwritten while
+ *                       still open. A real port reset would need re-addressing
+ *                       through BCM2837DWC2's enumeration, which is not
+ *                       implemented.
+ *   GetPortInformation  kIOReturnNoDevice with *info = 0, the no-parent
+ *                       result (IOUSBDevice.cpp:4235-4246). The one difference
+ *                       is that GetDeviceInformation() now continues past the
+ *                       call and records "not internal" from that zero.
+ *   ReEnumeratePort     base class, kIOReturnUnsupported. The interfaces are
+ *                       terminated either way. With no parent
+ *                       _ReEnumerateDevice() returned kIOReturnNoDevice; it
+ *                       now returns success and its thread's ReEnumeratePort()
+ *                       fails, and IOUSBDevice ignores that result
+ *                       (IOUSBDevice.cpp ProcessPortReEnumerate()).
+ *   Request/ReturnExtraPower  0 mA and success, what IOUSBDevice computes
+ *                       with no parent. The base class would dereference
+ *                       _device, the hub's own IOUSBHubDevice, which does
+ *                       not exist here.
  *
  * Never started or registered. It is a plain object that IOUSBDevice
  * retains as its hub parent, not a node in the service or power planes.
@@ -219,19 +251,24 @@ class BCM2837USBPortPolicy : public IOUSBHubPolicyMaker
 	OSDeclareDefaultStructors(BCM2837USBPortPolicy);
 
 public:
-	static BCM2837USBPortPolicy *withDevice(BCM2837DWC2 *dwc2, IOUSBDevice *device,
-	    uint8_t address);
+	static BCM2837USBPortPolicy *withDevice(IOUSBDevice *device);
+	virtual void		free(void) override;
 
 	virtual bool		ConfigureHubDriver(void) override;
 	virtual IOReturn	HubPowerChange(unsigned long powerStateOrdinal) override;
 	virtual IOReturn	SuspendPort(UInt32 portNum, bool suspend) override;
+	virtual IOReturn	ResetPort(UInt32 portNum) override;
+	virtual IOReturn	GetPortInformation(UInt32 portNum, UInt32 *info) override;
 	virtual UInt32		RequestExtraPower(UInt32 portNum, UInt32 type, UInt32 requestedPower) override;
 	virtual IOReturn	ReturnExtraPower(UInt32 portNum, UInt32 type, UInt32 returnedPower) override;
 
 private:
-	BCM2837DWC2  *fDWC2;
-	IOUSBDevice  *fDevice;      // not retained: it retains us (SetHubParent)
-	uint8_t       fAddress;
+	IOUSBDevice    *fDevice;      // not retained: it retains us (SetHubParent)
+	thread_call_t   fResumedCall;
+	IOLock         *fResumedLock; // serializes deliveries, and the wait for one
+	bool            fResumedDone;
+
+	static void	deliverResumed(thread_call_param_t owner, thread_call_param_t);
 };
 
 class BCM2837USBHostController : public IOUSBControllerV2

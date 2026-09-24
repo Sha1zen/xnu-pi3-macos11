@@ -79,19 +79,21 @@ BCM2837LocalIntc::setIPIHandler(void (*handler)(void))
 
 /*
  * Raise core 0's mailbox 0. The IRQ it produces is taken like any other,
- * when the CPU next has IRQs unmasked, which is what makes it an IPI and not
- * a function call: XNU relies on a signal a CPU posts to itself (for
- * example a decrementer pended as SIGPdec because it cannot be serviced
- * right now) being handled later, from interrupt context.
+ * when the CPU next has IRQs unmasked. That is what makes it an IPI rather
+ * than a function call. On arm64 the self-signals that matter are xcalls
+ * (cpu_xcall()/cpu_immediate_xcall() to the current CPU) and
+ * SIGPnop/SIGPast, and cpu_signal_handler() processes them from interrupt
+ * context, never inside the code that posted them.
+ * cpu_signal_internal() has already issued DSB ISH before calling
+ * PE_cpu_signal() (osfmk/arm/cpu_common.c:477), so no barrier is needed here.
  */
 bool
 BCM2837LocalIntc::sendIPI(void)
 {
 	BCM2837LocalIntc *me = sInstance;
-	if (me == NULL || me->fRegBase == NULL) {
+	if (me == NULL) {
 		return false;
 	}
-	__asm__ volatile ("dsb sy" ::: "memory");
 	me->fRegBase[kRegMailbox0Set0] = 1;
 	return true;
 }
@@ -109,7 +111,8 @@ BCM2837LocalIntc::start(IOService *provider)
 		return false;
 	}
 	// Backlog item 26: confirm the mapping is actually big enough to cover
-	// the highest offset this driver touches (kRegIRQPending0 = 0x60)
+	// the highest offset this driver touches (kRegMailbox0Clr0 = 0xC0 since
+	// DAR-375)
 	// before trusting it - "local-intc"'s own reg property declares 0x100
 	// bytes, so this should always pass; catches a misconfigured DT rather
 	// than a runtime condition.
@@ -153,9 +156,8 @@ BCM2837LocalIntc::start(IOService *provider)
 	fRegBase[kRegTimerControl0] = 0xF0;
 
 	// DAR-375: core 0 mailbox 0 as its IPI. Clear anything stale, then
-	// enable its IRQ (bit 0; FIQ bits 4-7 left clear). The mapping-size
-	// check above covers 0x64; these reach 0xC4, still inside the node's
-	// 0x100 bytes.
+	// enable its IRQ (bit 0; FIQ bits 4-7 left clear). Covered by the
+	// mapping-size check above.
 	fRegBase[kRegMailbox0Clr0] = 0xFFFFFFFF;
 	fRegBase[kRegMailboxControl0] = 0x1;
 
@@ -219,6 +221,12 @@ BCM2837LocalIntc::start(IOService *provider)
 void
 BCM2837LocalIntc::stop(IOService *provider)
 {
+	// No more IPIs through a mapping that is about to go away.
+	if (sInstance == this) {
+		fRegBase[kRegMailboxControl0] = 0;
+		sInstance = NULL;
+		OSMemoryBarrier();
+	}
 	if (fRegMap != NULL) {
 		fRegMap->release();
 		fRegMap = NULL;
@@ -269,8 +277,8 @@ BCM2837LocalIntc::handleInterrupt(void * /*refCon*/, IOService * /*nub*/, int /*
 		// posted while it runs raises a fresh one rather than being lost
 		// (the same ordering sleh.c keeps for Apple's fast IPIs,
 		// osfmk/arm64/sleh.c:1833-1844).
-		uint32_t mbox = fRegBase[kRegMailbox0Clr0];
-		fRegBase[kRegMailbox0Clr0] = mbox;
+		// Write-1-to-clear: one bit is all this mailbox is ever used for.
+		fRegBase[kRegMailbox0Clr0] = 0xFFFFFFFF;
 		__asm__ volatile ("dsb sy" ::: "memory");
 		void (*handler)(void) = sIPIHandler;
 		if (handler != NULL) {
@@ -304,10 +312,10 @@ BCM2837LocalIntc::handleInterrupt(void * /*refCon*/, IOService * /*nub*/, int /*
 	}
 
 	// Backlog item 2: this used to silently ignore any pending0 bit other
-	// than kVectorGPUIRQ. Structurally impossible to hit in QEMU
-	// (bcm2836_control_reset() zeroes the mailbox/local-timer control
-	// registers that would need to be live for one of these to assert),
-	// but real firmware may leave one enabled. A bit here that this
+	// than kVectorGPUIRQ. Mailbox 0 is handled above since DAR-375; the
+	// other mailboxes and the local-timer IRQ sources are never enabled by
+	// this driver (bcm2836_control_reset() zeroes their control registers
+	// in QEMU), but real firmware may leave one enabled. A bit here that this
 	// driver doesn't service never gets cleared, so the CPU IRQ line
 	// stays asserted and sleh_irq() re-enters immediately - a silent
 	// spin with zero diagnostic trace, previously. Latch (not IOLog -

@@ -73,6 +73,11 @@ void
 BCM2837CPU::initCPU(bool boot)
 {
 	if (!boot) {
+		// Resume (PE_cpu_machine_init(target, FALSE)). ml_arm_sleep() set
+		// SIGPdisabled again (osfmk/arm64/machine_routines.c:592); clear it
+		// the way Apple does on every init - see the DAR-375 comment below.
+		// Latent here: this port never sleeps (quiesceCPU()).
+		signalCPU(this);
 		return;
 	}
 
@@ -162,28 +167,25 @@ BCM2837CPU::initCPU(bool boot)
 	 * Confirmed from guest memory: idle_enable == 1,
 	 * cpu_data[0].cpu_signal == 0x80000000.
 	 *
-	 * Run the handler once here, as this CPU's first IPI would, with
-	 * interrupts off as they are for a real IPI. With nothing pending it
-	 * only clears SIGPdisabled (its signal loop runs zero times).
+	 * Apple's boot-CPU path clears it by sending the CPU an IPI to itself
+	 * on every init, boot and resume alike: PE_cpu_machine_init(), "Send
+	 * myself an IPI to clear SIGPdisabled" (iokit/Kernel/arm/AppleARMSMP.cpp
+	 * :242-247). Do the same, through core 0's mailbox 0 (signalCPU()).
+	 * Apple then waits for ml_cpu_signal_is_enabled(). This cannot wait:
+	 * the mailbox is BCM2837LocalIntc's, and that driver only starts after
+	 * this CPU's interrupt controller is published below. So the IPI raised
+	 * here is a no-op at boot, and BCM2837LocalIntc::start() raises the one
+	 * that clears the flag, once the mailbox IRQ is live. Until then the
+	 * flag stays set, so a self-xcall keeps failing with KERN_FAILURE as it
+	 * always has, instead of succeeding with nothing to deliver it.
 	 *
-	 * What else this changes: signals cpu0 sends itself. Most never
-	 * checked the flag (cpu_signal_internal(): Check_SIGPdisabled = 0 when
-	 * target == self, cpu_common.c:423-427) and there is no other CPU to
-	 * signal this one. But a self-xcall (SIGPxcall/SIGPxcallImm) did check
-	 * it (cpu_common.c:430-435) and failed with KERN_FAILURE. It now
-	 * succeeds, so it must actually be delivered: see signalCPU() below.
-	 *
-	 * This one direct call is fine where signalCPU()'s would not be: it is
-	 * made once, from this CPU's own bring-up, not from inside a sender,
-	 * and there is nothing pending for it to run.
+	 * Once the flag is clear, a self-xcall (SIGPxcall/SIGPxcallImm, the one
+	 * self-signal that checks it, cpu_common.c:429-435) succeeds and is
+	 * delivered by that same mailbox IPI.
 	 */
 	if (ipi_handler != NULL) {
-		// IPIs arrive through core 0's mailbox 0; see signalCPU().
 		BCM2837LocalIntc::setIPIHandler(ipi_handler);
-
-		boolean_t istate = ml_set_interrupts_enabled(FALSE);
-		ipi_handler();
-		ml_set_interrupts_enabled(istate);
+		signalCPU(this);
 	}
 
 	// Publish the controller only now that it's actually enabled - see

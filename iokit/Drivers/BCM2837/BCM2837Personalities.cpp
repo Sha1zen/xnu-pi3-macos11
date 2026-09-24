@@ -211,12 +211,14 @@ makeFDiskContentTable(void)
  *    (IOGraphics.xcodeproj/project.pbxproj:2188). It creates
  *    gIOFBSystemWorkLoop (it panics itself if it can't), the global
  *    framebuffer arrays, and the gtrace buffers that IOFramebuffer
- *    uses. Built into the kernel, nothing calls it. A kext's start
- *    routine always runs before its personalities reach the catalogue,
- *    so it runs here, right before they are added -- this function is
- *    called from InitIOKit() (IOStartIOKit.cpp), before
- *    StartIOKitMatching(). If it fails, none of the IOGraphics
- *    personalities are published.
+ *    uses. Built into the kernel, nothing calls it. OSKext::load() runs
+ *    a kext's start() (libkern/c++/OSKext.cpp:5814) before it sends the
+ *    kext's personalities to the catalogue (:5831), and sends them only
+ *    if start succeeded; and no class of a demand-loaded kext can be
+ *    instantiated before that load has run start(). Same order here: it
+ *    runs right before the IOGraphics personalities are added, from
+ *    InitIOKit() (IOStartIOKit.cpp), before StartIOKitMatching(). If it
+ *    fails, none of the IOGraphics personalities are published.
  *
  * 2. Apple's own personalities, verbatim from Info-IOGraphicsFamily.plist
  *    (IODisplayWrangler, AppleDisplay, AppleBacklightDisplay), minus

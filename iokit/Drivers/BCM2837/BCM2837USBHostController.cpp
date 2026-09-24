@@ -242,6 +242,12 @@ BCM2837USBHostController::start(IOService *provider)
 void
 BCM2837USBHostController::free(void)
 {
+	if (fReenumTestCall != NULL) {
+		thread_call_cancel_wait(fReenumTestCall);
+		thread_call_free(fReenumTestCall);
+		fReenumTestCall = NULL;
+	}
+
 	// UIMFinalize() does the real teardown; this is the belt-and-braces path
 	// for a controller that failed part-way through start(). Stop the
 	// engine first, so returnTransfers() below cannot park anything new,
@@ -288,12 +294,6 @@ BCM2837USBHostController::free(void)
 		IOFree(fStaging, fStagingSize);
 		fStaging = NULL;
 		fStagingSize = 0;
-	}
-
-	if (fReenumTestCall != NULL) {
-		thread_call_cancel_wait(fReenumTestCall);
-		thread_call_free(fReenumTestCall);
-		fReenumTestCall = NULL;
 	}
 
 	if (fFrameLock != NULL) {
@@ -414,6 +414,10 @@ BCM2837USBHostController::UIMInitialize(IOService *provider)
 IOReturn
 BCM2837USBHostController::UIMFinalize(void)
 {
+	if (fReenumTestCall != NULL) {
+		thread_call_cancel_wait(fReenumTestCall);
+	}
+
 	fEngineRunning = false;
 
 	if (fPollTimer != NULL) {
@@ -497,14 +501,7 @@ BCM2837USBHostController::createEndpoint(UInt8 functionNumber, UInt8 endpointNum
 		return ep;
 	}
 
-	const DWC2USBDevice *dev = NULL;
-	for (uint32_t i = 0; i < fDWC2->deviceCount(); i++) {
-		const DWC2USBDevice *candidate = fDWC2->deviceAt(i);
-		if (candidate != NULL && candidate->inUse && candidate->address == functionNumber) {
-			dev = candidate;
-			break;
-		}
-	}
+	const DWC2USBDevice *dev = fDWC2->findDevice(functionNumber);
 	if (dev == NULL) {
 		IOLog("BCM2837USBHostController: no enumerated device at address %u "
 		      "(endpoint %u)\n", functionNumber, endpointNumber);
@@ -2067,22 +2064,53 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	return kIOReturnSuccess;
 }
 
+/*
+ * Retire every UIM endpoint still open for `address`, on the workloop. The
+ * old IOUSBDevice's pipes were closed when it terminated, but a driver can
+ * re-queue from its "returned" completion and createEndpoint() would have
+ * recreated the endpoint on demand. Without this, the new device at the same
+ * address would inherit that endpoint: its toggle, its back-off and a
+ * transfer whose completion belongs to a driver that is gone.
+ */
+IOReturn
+BCM2837USBHostController::purgeAddressGated(OSObject *owner, void *arg0, void *, void *, void *)
+{
+	BCM2837USBHostController *me = (BCM2837USBHostController *)owner;
+	UInt8 address = (UInt8)(uintptr_t)arg0;
+	for (DWC2UIMEndpoint *ep = me->fEndpoints; ep != NULL; ep = ep->next) {
+		if (ep->retired || ep->functionNumber != address) {
+			continue;
+		}
+		ep->retired = true;
+		me->collectAsync(ep, true);
+		me->returnTransfers(ep, kIOReturnAborted);
+	}
+	return kIOReturnSuccess;
+}
+
 IOReturn
 BCM2837USBHostController::ReEnumerateAddress(UInt8 address, bool extraResetDelay)
 {
-	IOReturn ret = fDWC2->reenumerateDevice(address, extraResetDelay);
-	if (ret != kIOReturnSuccess) {
-		return ret;
+	// Nothing may address the old device from here on: detach it in the
+	// table first (so createEndpoint() cannot recreate an endpoint for it),
+	// then retire whatever the UIM still has open for it.
+	fDWC2->detachDevice(address);
+	if (_commandGate != NULL) {
+		_commandGate->runAction(purgeAddressGated, (void *)(uintptr_t)address);
 	}
-	for (uint32_t i = 0; i < fDWC2->deviceCount(); i++) {
-		const DWC2USBDevice *dev = fDWC2->deviceAt(i);
-		if (dev != NULL && dev->inUse && dev->address == address) {
-			IOLog("BCM2837USBHostController: re-enumerated device %u, "
-			    "publishing it again\n", address);
-			return PublishEnumeratedDevice(dev);
-		}
+
+	const DWC2USBDevice *dev = NULL;
+	IOReturn ret = fDWC2->reenumerateDevice(address, extraResetDelay, &dev);
+	if (ret != kIOReturnSuccess || dev == NULL) {
+		return (ret != kIOReturnSuccess) ? ret : kIOReturnNoDevice;
 	}
-	return kIOReturnNoDevice;
+	if (!fDWC2->publishable(dev)) {
+		// Came back as something boot would not have published either.
+		return kIOReturnSuccess;
+	}
+	IOLog("BCM2837USBHostController: re-enumerated device %u, publishing it again\n",
+	    address);
+	return PublishEnumeratedDevice(dev);
 }
 
 void
@@ -2232,6 +2260,14 @@ BCM2837USBPortPolicy::ReEnumeratePort(UInt32 portNum, UInt32 options)
 	}
 	old->terminate(kIOServiceRequired | kIOServiceSynchronous);
 	old->release();
+
+	// AppleUSBHubPort bails out here if it was stopped meanwhile
+	// (AppleUSBHubPort.cpp:1407-1412, "Remove device can be synchronous ...
+	// check to see if we have been stop()'s"). Same for the controller.
+	if (controller->isInactive()) {
+		release();
+		return kIOReturnNotPermitted;
+	}
 
 	// The add half.
 	IOReturn ret = controller->ReEnumerateAddress(address,

@@ -442,6 +442,7 @@ private:
 	thread_call_t        fReenumTestCall;
 	UInt32               fReenumTestMask;
 	static void		reenumTestFired(thread_call_param_t owner, thread_call_param_t);
+	static IOReturn		purgeAddressGated(OSObject *owner, void *arg0, void *, void *, void *);
 
 	// Poked by BCM2837DWC2::interruptOccurred() when a parked channel halts.
 	// Runs asyncEventFired() on this controller's workloop.

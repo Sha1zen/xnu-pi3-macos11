@@ -641,6 +641,10 @@ private:
 	 */
 	IOLock                  *fBSDRegisterLock;
 
+	// Serializes reenumerateDevice() (DAR-373): at most one device at
+	// address 0 at a time.
+	IOLock                  *fEnumLock;
+
 	// Bring-up scaffolding (see the long comment at the call site in
 	// start()): owned for as long as this controller is, so the Ethernet
 	// driver they back has a live transport past start() returning. NULL
@@ -920,9 +924,24 @@ public:
 	 * `extraResetDelay` is kUSBAddExtraResetTimeMask: 100 ms more after the
 	 * reset, as AppleUSBHubPort does (sets it at AppleUSBHubPort.cpp:1391-1399,
 	 * sleeps at :1791-1798).
-	 * Blocking. Must not be called on the UIM's workloop.
+	 * Blocking. Must not be called on the UIM's workloop. Retries the
+	 * reset-and-enumerate up to three times. On success *dev is the
+	 * re-enumerated entry.
 	 */
-	IOReturn reenumerateDevice(uint8_t address, bool extraResetDelay);
+	IOReturn reenumerateDevice(uint8_t address, bool extraResetDelay,
+	                           const DWC2USBDevice **dev);
+
+	// Mark an enumerated device gone (inUse false) ahead of
+	// reenumerateDevice(), so nothing - the UIM's on-demand endpoint
+	// creation in particular - can address it while it is being torn down.
+	IOReturn detachDevice(uint8_t address);
+
+	// The in-use table entry at `address`, or NULL.
+	const DWC2USBDevice *findDevice(uint8_t address) const;
+
+	// Whether startUSBHostController()'s rules publish this device (not a
+	// hub, not claimed by SMSC9514Ethernet).
+	bool     publishable(const DWC2USBDevice *dev) const;
 	uint32_t deviceCount(void) const { return fNumDevices; }
 
 	// Find the first enumerated device whose interface class matches, e.g.

@@ -61,49 +61,127 @@ BCM2837DWC2::deviceByAddress(uint8_t address)
 	return NULL;
 }
 
+const DWC2USBDevice *
+BCM2837DWC2::findDevice(uint8_t address) const
+{
+	for (uint32_t i = 0; i < fNumDevices; i++) {
+		if (fDevices[i].inUse && fDevices[i].address == address) {
+			return &fDevices[i];
+		}
+	}
+	return NULL;
+}
+
+/*
+ * The boot-time publish rules (startUSBHostController()), shared with
+ * re-enumeration so a device that comes back different is filtered the same
+ * way.
+ */
+bool
+BCM2837DWC2::publishable(const DWC2USBDevice *dev) const
+{
+	if (dev == NULL || !dev->inUse) {
+		return false;
+	}
+	if (dev->deviceClass == 9 /* USB hub class */) {
+		IOLog("BCM2837DWC2: skipping hub at address %u (no hub driver "
+		      "vendored; enumerateBus already walked its ports)\n", dev->address);
+		return false;
+	}
+	if (fEthernetDriver != NULL &&
+	    SMSC9514USBTransport::findEthernetFunction(this) == dev) {
+		// Already hand-wired to SMSC9514Ethernet. Publishing a nub for it
+		// too would let a second driver open the same endpoints.
+		IOLog("BCM2837DWC2: address %u already claimed by SMSC9514Ethernet\n",
+		    dev->address);
+		return false;
+	}
+	return true;
+}
+
 IOReturn
-BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay)
+BCM2837DWC2::detachDevice(uint8_t address)
 {
 	DWC2USBDevice *dev = deviceByAddress(address);
+	if (dev == NULL) {
+		return kIOReturnNoDevice;
+	}
+	dev->inUse = false;
+	return kIOReturnSuccess;
+}
+
+IOReturn
+BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
+    const DWC2USBDevice **devOut)
+{
+	*devOut = NULL;
+
+	// The slot keeps its address while detached, so look it up regardless
+	// of inUse.
+	DWC2USBDevice *dev = NULL;
+	for (uint32_t i = 0; i < fNumDevices; i++) {
+		if (fDevices[i].address == address) {
+			dev = &fDevices[i];
+			break;
+		}
+	}
 	if (dev == NULL) {
 		return kIOReturnNoDevice;
 	}
 	uint8_t parentHubAddr = dev->parentHubAddr;
 	uint8_t parentPort = dev->parentPort;
 
-	// Gone until enumeration succeeds: deviceByAddress() and the UIM's
-	// endpoint lookup skip it from here on.
+	/*
+	 * One device at address 0 at a time, like AppleUSBHub's dev-zero lock
+	 * (AppleUSBHubPort::AddDevice, AppleUSBHubPort.cpp:728-754). Two
+	 * re-enumerations running together would both reset a port and both
+	 * leave a device answering at address 0.
+	 */
+	IOLockLock(fEnumLock);
 	dev->inUse = false;
 
-	uint8_t speed = kUSBSpeedFull;
-	uint8_t splitHubAddr = 0, splitHubPort = 0;
-	if (parentHubAddr == 0) {
-		// On the root port.
-		if (!portReset()) {
-			return kIOReturnNotResponding;
+	IOReturn ret = kIOReturnNotResponding;
+	// AppleUSBHubPort retries a failed add rather than giving up on the
+	// first transient error; three attempts, as doTransfer() gives XACTERR.
+	for (int attempt = 0; attempt < 3 && ret != kIOReturnSuccess; attempt++) {
+		uint8_t speed = kUSBSpeedFull;
+		uint8_t splitHubAddr = 0, splitHubPort = 0;
+		if (parentHubAddr == 0) {
+			// On the root port. Resetting it resets the whole bus, so keep
+			// channel 0's synchronous transfers out of the way.
+			IOLockLock(fTransferLock);
+			bool ok = portReset();
+			IOLockUnlock(fTransferLock);
+			if (!ok) {
+				continue;
+			}
+			speed = fRootSpeed;
+		} else {
+			DWC2USBDevice *hub = deviceByAddress(parentHubAddr);
+			if (hub == NULL) {
+				ret = kIOReturnNoDevice;
+				break;
+			}
+			if (!resetHubPort(hub, parentPort, &speed, &splitHubAddr, &splitHubPort)) {
+				continue;
+			}
 		}
-		speed = fRootSpeed;
-	} else {
-		DWC2USBDevice *hub = deviceByAddress(parentHubAddr);
-		if (hub == NULL) {
-			return kIOReturnNoDevice;
+		if (extraResetDelay) {
+			IOSleep(100);
 		}
-		if (!resetHubPort(hub, parentPort, &speed, &splitHubAddr, &splitHubPort)) {
-			return kIOReturnNotResponding;
-		}
-	}
-	if (extraResetDelay) {
-		IOSleep(100);
-	}
 
-	DWC2USBDevice *out = NULL;
-	if (!enumerateDevice(speed, parentHubAddr, parentPort, splitHubAddr, splitHubPort,
-	    &out, dev)) {
-		IOLog("BCM2837DWC2: re-enumeration of device %u (hub %u port %u) failed\n",
-		    address, parentHubAddr, parentPort);
-		return kIOReturnNotResponding;
+		DWC2USBDevice *out = NULL;
+		if (enumerateDevice(speed, parentHubAddr, parentPort, splitHubAddr, splitHubPort,
+		    &out, dev)) {
+			*devOut = out;
+			ret = kIOReturnSuccess;
+		} else {
+			IOLog("BCM2837DWC2: re-enumeration of device %u (hub %u port %u), "
+			    "attempt %d/3 failed\n", address, parentHubAddr, parentPort, attempt + 1);
+		}
 	}
-	return kIOReturnSuccess;
+	IOLockUnlock(fEnumLock);
+	return ret;
 }
 
 bool
@@ -530,10 +608,6 @@ BCM2837DWC2::hubGetPortStatus(DWC2USBDevice *hub, uint8_t port,
 }
 
 /*
- * Power up every downstream port, then reset and enumerate whatever is
- * attached. This is the step that reaches the LAN9514's Ethernet function.
- */
-/*
  * Reset one hub port and report what came up on it: its speed, and the
  * SPLIT routing a device there needs. Split out of hubEnumeratePorts() for
  * DAR-373 so re-enumeration resets a port exactly as first enumeration does.
@@ -544,6 +618,30 @@ BCM2837DWC2::resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speedOut,
     uint8_t *splitHubAddrOut, uint8_t *splitHubPortOut)
 {
 	uint16_t status = 0, change = 0;
+
+	/*
+	 * DAR-373: this also resets a port that is already enabled
+	 * (re-enumeration), not only one that has just been connected. So:
+	 * nothing to do if nothing is connected (AppleUSBHubPort::AddDevice
+	 * checks the same before resetting); clear any stale C_PORT_RESET /
+	 * C_PORT_ENABLE so the change bits read after the reset are this
+	 * reset's; and remember whether the port was already enabled, because
+	 * then "RESET clear and ENABLE set" below proves nothing.
+	 */
+	if (!hubGetPortStatus(hub, port, &status, &change)) {
+		return false;
+	}
+	if (!(status & kPortStatusConnection)) {
+		IOLog("BCM2837DWC2: hub port %u: nothing connected, not resetting\n", port);
+		return false;
+	}
+	if (change & kPortChangeReset) {
+		hubClearPortFeature(hub, port, kHubFeatCPortReset);
+	}
+	if (change & kPortChangeEnable) {
+		hubClearPortFeature(hub, port, kHubFeatCPortEnable);
+	}
+	const bool wasEnabled = (status & kPortStatusEnable) != 0;
 
 	// USB 2.0 spec 7.1.7.3: let the connection settle before reset.
 	IOSleep(100);
@@ -565,7 +663,7 @@ BCM2837DWC2::resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speedOut,
 			resetDone = true;
 			break;
 		}
-		if (!(status & kPortStatusReset) && (status & kPortStatusEnable)) {
+		if (!wasEnabled && !(status & kPortStatusReset) && (status & kPortStatusEnable)) {
 			resetDone = true;
 			break;
 		}
@@ -636,6 +734,10 @@ BCM2837DWC2::resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speedOut,
 	return true;
 }
 
+/*
+ * Power up every downstream port, then reset and enumerate whatever is
+ * attached. This is the step that reaches the LAN9514's Ethernet function.
+ */
 bool
 BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub)
 {

@@ -207,7 +207,7 @@ makeFDiskContentTable(void)
  * DAR-331: IOGraphics (vendored by tools/vendor_iographics_into_xnu.sh).
  *
  * 1. Module start. IOGraphicsFamilyModuleStart() (IOGraphicsFamily/
- *    IOFramebuffer.cpp:1989) is the family kext's MODULE_START
+ *    IOFramebuffer.cpp:1978) is the family kext's MODULE_START
  *    (IOGraphics.xcodeproj/project.pbxproj:2188). It creates
  *    gIOFBSystemWorkLoop (it panics itself if it can't), the global
  *    framebuffer arrays, and the gtrace buffers that IOFramebuffer
@@ -223,7 +223,7 @@ makeFDiskContentTable(void)
  *    CFBundleIdentifier, which no built-in personality in this file
  *    carries. IODisplayWrangler's two parameter dicts are real inputs:
  *    IOFramebuffer::setPreferences() reads both from it
- *    (IOFramebuffer.cpp:14405-14409).
+ *    (IOFramebuffer.cpp:14358-14368).
  *
  * 3. IOBootFramebuffer has no published personality -- on Apple's
  *    platforms IONDRVSupport instantiates it, and that path is PCI/NDRV

@@ -205,16 +205,19 @@ struct DWC2UIMEndpoint
  *
  *   SuspendPort(true)   returns kIOReturnUnsupported, so IOUSBDevice tells
  *                       clients kIOUSBMessagePortWasNotSuspended (the true
- *                       answer), and delivers kIOUSBMessagePortHasBeenResumed
- *                       as above. AppleUSBHubPort delivers its resume message
- *                       from the hub's own thread while SuspendPort's caller
- *                       waits (AppleUSBHubPort.cpp:1258-1266, :2812). This
- *                       does the same: a thread call, and the caller blocks
- *                       until it has run. Clients are never re-entered on the
- *                       caller's thread.
+ *                       answer). It also queues kIOUSBMessagePortHasBeenResumed
+ *                       as above, from a thread call, like AppleUSBHub's
+ *                       DoPortAction(). It does not wait for it: the caller
+ *                       can hold the USB workloop gate that the client's
+ *                       handler needs, and waiting deadlocked.
  *   SuspendPort(false)  the port is not suspended, so
  *                       kIOUSBDevicePortWasNotSuspended, as AppleUSBHubPort
- *                       answers (AppleUSBHubPort.cpp:1344-1351).
+ *                       answers (AppleUSBHubPort.cpp:1344-1351). A resume
+ *                       message still pending from the suspend is delivered
+ *                       first, on this thread. AppleUSBHubPort guarantees the
+ *                       message lands before SuspendPort() returns
+ *                       (:1258-1266, :2812), and AppleUSBCDCECMData::wakeUp()
+ *                       depends on that.
  *
  * Installing a hub parent also routes IOUSBDevice's other port operations
  * here. Each keeps the result it had with no hub parent:
@@ -265,9 +268,10 @@ public:
 private:
 	IOUSBDevice    *fDevice;      // not retained: it retains us (SetHubParent)
 	thread_call_t   fResumedCall;
-	IOLock         *fResumedLock; // serializes deliveries, and the wait for one
-	bool            fResumedDone;
+	IOLock         *fResumedLock; // guards fResumedPending only; never held while messaging
+	bool            fResumedPending;
 
+	void		messageResumed(void);
 	static void	deliverResumed(thread_call_param_t owner, thread_call_param_t);
 };
 

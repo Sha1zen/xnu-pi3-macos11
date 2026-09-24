@@ -2006,6 +2006,10 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	if (policy != NULL) {
 		nub->SetHubParent(policy);      // retains it
 		policy->release();
+	} else {
+		IOLog("BCM2837USBHostController: no hub policy for address %u - "
+		    "SuspendDevice() will not send kIOUSBMessagePortHasBeenResumed "
+		    "(DAR-372)\n", dev->address);
 	}
 
 	// CreateDevice() attaches and starts the nub but deliberately does not
@@ -2044,29 +2048,7 @@ BCM2837USBPortPolicy::withDevice(IOUSBDevice *device)
 		return NULL;
 	}
 	me->fDevice = device;
-	me->fResumedLock = IOLockAlloc();
-	me->fResumedCall = thread_call_allocate(deliverResumed, me);
-	if (me->fResumedLock == NULL || me->fResumedCall == NULL) {
-		me->release();
-		return NULL;
-	}
 	return me;
-}
-
-void
-BCM2837USBPortPolicy::free(void)
-{
-	// Nothing can be pending: a queued delivery holds a reference to this
-	// object until it has finished (deliverResumed()).
-	if (fResumedCall != NULL) {
-		thread_call_free(fResumedCall);
-		fResumedCall = NULL;
-	}
-	if (fResumedLock != NULL) {
-		IOLockFree(fResumedLock);
-		fResumedLock = NULL;
-	}
-	IOUSBHubPolicyMaker::free();
 }
 
 // Never started, so neither of these is ever called; they are pure in the
@@ -2084,81 +2066,31 @@ BCM2837USBPortPolicy::HubPowerChange(unsigned long powerStateOrdinal)
 	return kIOReturnUnsupported;
 }
 
-void
-BCM2837USBPortPolicy::messageResumed(void)
-{
-	IOReturn status = kIOReturnSuccess;
-	fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
-}
-
-void
-BCM2837USBPortPolicy::deliverResumed(thread_call_param_t owner, thread_call_param_t)
-{
-	BCM2837USBPortPolicy *me = (BCM2837USBPortPolicy *)owner;
-
-	IOLockLock(me->fResumedLock);
-	bool deliver = me->fResumedPending;
-	me->fResumedPending = false;
-	IOLockUnlock(me->fResumedLock);
-
-	if (deliver) {
-		me->messageResumed();
-	}
-
-	// Taken by SuspendPort() for this call.
-	me->fDevice->release();
-	me->release();
-}
-
 IOReturn
 BCM2837USBPortPolicy::SuspendPort(UInt32 portNum, bool suspend)
 {
 #pragma unused (portNum)
-	if (suspend) {
-		/*
-		 * The port stays up, and clients are told so asynchronously, as
-		 * AppleUSBHub's DoPortAction() does (see the header). Not
-		 * waited for: SuspendDevice()'s callers can hold the USB
-		 * workloop gate (AppleUSBCDCECMData::disable() runs under
-		 * IONetworkController's command gate), and a client's handler
-		 * needs that gate. Waiting deadlocked `ifconfig en0 down`.
-		 */
-		IOLockLock(fResumedLock);
-		bool alreadyPending = fResumedPending;
-		fResumedPending = true;
-		IOLockUnlock(fResumedLock);
-		if (!alreadyPending) {
-			retain();
-			fDevice->retain();
-			if (thread_call_enter(fResumedCall)) {
-				// Was already queued (its earlier delivery ran and cleared
-				// fResumedPending but the call itself had not finished).
-				// That queued run delivers this one; drop our extra refs.
-				fDevice->release();
-				release();
-			}
-		}
-		return kIOReturnUnsupported;
+	if (!suspend) {
+		// Never suspended (see below): AppleUSBHubPort.cpp:1344-1351.
+		return kIOUSBDevicePortWasNotSuspended;
 	}
 
 	/*
-	 * Resume. AppleUSBHubPort delivers kIOUSBMessagePortHasBeenResumed
-	 * before SuspendPort() returns (it waits for the resume handler,
-	 * AppleUSBHubPort.cpp:2812). A client such as AppleUSBCDCECMData
-	 * relies on that: wakeUp() calls allocateResources() straight after
-	 * SuspendDevice(false). So a delivery still pending from the suspend is
-	 * made here, on this thread, before returning. If the thread call has
-	 * already started it may deliver a second time, and a repeated
-	 * "resumed" is harmless.
+	 * The port stays up. Tell the clients, inline on this thread, the way
+	 * AppleUSBHub does when a suspend did not take: SuspendPort() calls
+	 * DoPortAction() directly (AppleUSBHub.cpp:5277), which calls
+	 * MessageDeviceClients(kIOUSBMessagePortHasBeenResumed) directly
+	 * (:3515-3522). A caller holding the USB workloop gate is fine: the
+	 * gate is recursive, and a client handler that needs it (e.g.
+	 * AppleUSBCDCECMData's SetAlternateInterface()) runs in the same context
+	 * the caller's own next request would.
 	 */
-	IOLockLock(fResumedLock);
-	bool pending = fResumedPending;
-	fResumedPending = false;
-	IOLockUnlock(fResumedLock);
-	if (pending) {
-		messageResumed();
-	}
-	return kIOUSBDevicePortWasNotSuspended;
+	IOReturn status = kIOReturnSuccess;
+	fDevice->retain();
+	fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
+	fDevice->release();
+
+	return kIOReturnUnsupported;
 }
 
 IOReturn

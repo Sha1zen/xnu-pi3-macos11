@@ -197,27 +197,30 @@ struct DWC2UIMEndpoint
  * bus. Actually suspending it would need the UIM to stop polling the
  * device's endpoints first, because a hub does not forward tokens to a
  * suspended port. So this object answers the way AppleUSBHub itself does
- * when a suspend request did not leave the port suspended: it tells the
- * device's clients kIOUSBMessagePortHasBeenResumed
- * (third_party/IOUSBFamily/AppleUSBHub/Classes/AppleUSBHub.cpp:3515-3522,
- * "we are not suspended ... let our clients know ... by sending a
- * kIOUSBMessagePortHasBeenResumed message").
+ * when a suspend request did not leave the port suspended.
+ * AppleUSBHub::SuspendPort() runs DoPortAction() inline
+ * (third_party/IOUSBFamily/AppleUSBHub/Classes/AppleUSBHub.cpp:5277), which
+ * then tells the device's clients kIOUSBMessagePortHasBeenResumed, also
+ * inline (:3515-3522, "we are not suspended ... let our clients know").
  *
- *   SuspendPort(true)   returns kIOReturnUnsupported, so IOUSBDevice tells
- *                       clients kIOUSBMessagePortWasNotSuspended (the true
- *                       answer). It also queues kIOUSBMessagePortHasBeenResumed
- *                       as above, from a thread call, like AppleUSBHub's
- *                       DoPortAction(). It does not wait for it: the caller
- *                       can hold the USB workloop gate that the client's
- *                       handler needs, and waiting deadlocked.
+ *   SuspendPort(true)   delivers kIOUSBMessagePortHasBeenResumed to the
+ *                       device's clients synchronously, on the caller's
+ *                       thread, as above. Then returns kIOReturnUnsupported,
+ *                       so IOUSBDevice also tells clients
+ *                       kIOUSBMessagePortWasNotSuspended (asynchronously, from
+ *                       its own thread call) and SuspendDevice(true) reports
+ *                       the failure. Before this, it reported a suspend that
+ *                       never happened as a success.
+ *                       Consequence: AppleUSBCDCECMData re-selects its data
+ *                       alternate setting inside its own disable(), so the
+ *                       data interface's bulk pipes stay open while en0 is
+ *                       down. No reads or writes are posted on them. Real
+ *                       AppleUSBHub produces the same state on this path.
  *   SuspendPort(false)  the port is not suspended, so
  *                       kIOUSBDevicePortWasNotSuspended, as AppleUSBHubPort
- *                       answers (AppleUSBHubPort.cpp:1344-1351). A resume
- *                       message still pending from the suspend is delivered
- *                       first, on this thread. AppleUSBHubPort guarantees the
- *                       message lands before SuspendPort() returns
- *                       (:1258-1266, :2812), and AppleUSBCDCECMData::wakeUp()
- *                       depends on that.
+ *                       answers (AppleUSBHubPort.cpp:1344-1351).
+ *                       IOUSBDevice::SuspendDevice(false) still returns
+ *                       success (IOUSBDevice.cpp:4047-4059).
  *
  * Installing a hub parent also routes IOUSBDevice's other port operations
  * here. Each keeps the result it had with no hub parent:
@@ -232,15 +235,18 @@ struct DWC2UIMEndpoint
  *                       through BCM2837DWC2's enumeration, which is not
  *                       implemented.
  *   GetPortInformation  kIOReturnNoDevice with *info = 0, the no-parent
- *                       result (IOUSBDevice.cpp:4235-4246). The one difference
+ *                       result (IOUSBDevice.cpp:4233-4246). The one difference
  *                       is that GetDeviceInformation() now continues past the
  *                       call and records "not internal" from that zero.
- *   ReEnumeratePort     base class, kIOReturnUnsupported. The interfaces are
- *                       terminated either way. With no parent
- *                       _ReEnumerateDevice() returned kIOReturnNoDevice; it
- *                       now returns success and its thread's ReEnumeratePort()
- *                       fails, and IOUSBDevice ignores that result
- *                       (IOUSBDevice.cpp ProcessPortReEnumerate()).
+ *   ReEnumeratePort     base class, kIOReturnUnsupported. The interfaces
+ *                       and pipe zero are torn down either way, and nothing
+ *                       comes back. With no parent _ReEnumerateDevice()
+ *                       returned kIOReturnNoDevice. It now returns success,
+ *                       and its thread's ReEnumeratePort() failure is ignored
+ *                       (IOUSBDevice.cpp ProcessPortReEnumerate()). So a
+ *                       caller is no longer told that recovery failed. Real
+ *                       re-enumeration (re-publish from BCM2837DWC2's table)
+ *                       is DAR-373.
  *   Request/ReturnExtraPower  0 mA and success, what IOUSBDevice computes
  *                       with no parent. The base class would dereference
  *                       _device, the hub's own IOUSBHubDevice, which does
@@ -255,7 +261,6 @@ class BCM2837USBPortPolicy : public IOUSBHubPolicyMaker
 
 public:
 	static BCM2837USBPortPolicy *withDevice(IOUSBDevice *device);
-	virtual void		free(void) override;
 
 	virtual bool		ConfigureHubDriver(void) override;
 	virtual IOReturn	HubPowerChange(unsigned long powerStateOrdinal) override;
@@ -267,12 +272,6 @@ public:
 
 private:
 	IOUSBDevice    *fDevice;      // not retained: it retains us (SetHubParent)
-	thread_call_t   fResumedCall;
-	IOLock         *fResumedLock; // guards fResumedPending only; never held while messaging
-	bool            fResumedPending;
-
-	void		messageResumed(void);
-	static void	deliverResumed(thread_call_param_t owner, thread_call_param_t);
 };
 
 class BCM2837USBHostController : public IOUSBControllerV2

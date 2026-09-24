@@ -15,6 +15,8 @@
 #include <libkern/OSByteOrder.h>
 #include <pexpert/pexpert.h>
 
+OSDefineMetaClassAndStructors(BCM2837USBPortPolicy, IOUSBHubPolicyMaker);
+
 #define super IOUSBControllerV2
 OSDefineMetaClassAndStructors(BCM2837USBHostController, IOUSBControllerV2);
 
@@ -1997,6 +1999,15 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	    dev->deviceClass, (speed == kUSBDeviceSpeedHigh) ? "high" :
 	    ((speed == kUSBDeviceSpeedLow) ? "low" : "full"));
 
+	// The hub side of this device's port (DAR-372; see BCM2837USBPortPolicy).
+	// Before registerService(), so no driver can match and suspend the
+	// device before its hub parent exists.
+	BCM2837USBPortPolicy *policy = BCM2837USBPortPolicy::withDevice(fDWC2, nub, dev->address);
+	if (policy != NULL) {
+		nub->SetHubParent(policy);      // retains it
+		policy->release();
+	}
+
 	// CreateDevice() attaches and starts the nub but deliberately does not
 	// register it for matching - CreateRootHubDevice() does that separately
 	// for the root hub. This is the equivalent step for a real device, and it
@@ -2016,5 +2027,71 @@ BCM2837USBHostController::PublishEnumeratedDevice(const DWC2USBDevice *dev)
 	// enumeration/hot-plug cycles.
 	nub->release();
 
+	return kIOReturnSuccess;
+}
+
+#pragma mark - BCM2837USBPortPolicy (DAR-372)
+
+BCM2837USBPortPolicy *
+BCM2837USBPortPolicy::withDevice(BCM2837DWC2 *dwc2, IOUSBDevice *device, uint8_t address)
+{
+	BCM2837USBPortPolicy *me = new BCM2837USBPortPolicy;
+	if (me == NULL) {
+		return NULL;
+	}
+	if (!me->init()) {
+		me->release();
+		return NULL;
+	}
+	me->fDWC2 = dwc2;
+	me->fDevice = device;
+	me->fAddress = address;
+	return me;
+}
+
+// Never started, so neither of these is ever called; they are pure in the
+// base class.
+bool
+BCM2837USBPortPolicy::ConfigureHubDriver(void)
+{
+	return false;
+}
+
+IOReturn
+BCM2837USBPortPolicy::HubPowerChange(unsigned long powerStateOrdinal)
+{
+#pragma unused (powerStateOrdinal)
+	return kIOReturnUnsupported;
+}
+
+IOReturn
+BCM2837USBPortPolicy::SuspendPort(UInt32 portNum, bool suspend)
+{
+#pragma unused (portNum)
+	bool wasSuspended = false;
+	IOReturn status = fDWC2->hubPortSuspend(fAddress, suspend, &wasSuspended);
+
+	if (!suspend && status == kIOReturnSuccess) {
+		if (!wasSuspended) {
+			return kIOUSBDevicePortWasNotSuspended;
+		}
+		fDevice->retain();
+		fDevice->messageClients(kIOUSBMessagePortHasBeenResumed, &status, sizeof(IOReturn));
+		fDevice->release();
+	}
+	return status;
+}
+
+UInt32
+BCM2837USBPortPolicy::RequestExtraPower(UInt32 portNum, UInt32 type, UInt32 requestedPower)
+{
+#pragma unused (portNum, type, requestedPower)
+	return 0;
+}
+
+IOReturn
+BCM2837USBPortPolicy::ReturnExtraPower(UInt32 portNum, UInt32 type, UInt32 returnedPower)
+{
+#pragma unused (portNum, type, returnedPower)
 	return kIOReturnSuccess;
 }

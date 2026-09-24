@@ -98,6 +98,7 @@
 #define _BCM2837_USB_HOST_CONTROLLER_H
 
 #include <IOKit/usb/IOUSBControllerV2.h>
+#include <IOKit/usb/IOUSBHubPolicyMaker.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOInterruptEventSource.h>
 
@@ -174,6 +175,63 @@ struct DWC2UIMEndpoint
 	// against.
 	int                  asyncChan;
 	UInt32               asyncReq;
+};
+
+/*
+ * The hub side of one published device's port (DAR-372).
+ *
+ * IOUSBDevice routes port-level operations through its hub parent, the
+ * IOUSBHubPolicyMaker that AppleUSBHub would normally be
+ * (IOUSBDevice::SetHubParent(); _HUBPARENT in IOUSBDevice.cpp). AppleUSBHub
+ * is not vendored here (see the header comment above), so every device this
+ * controller published had no hub parent. IOUSBDevice::SuspendDevice() then
+ * reports a suspend that never happened (kIOUSBMessagePortHasBeenSuspended
+ * with status success) and a resume that sends nothing at all
+ * (IOUSBDevice.cpp:4036-4058). AppleUSBCDCECMData's disable() selects data
+ * alternate setting 0, which has no endpoints, and suspends the device. It
+ * gets its pipes back only when kIOUSBMessagePortHasBeenResumed arrives
+ * (AppleUSBCDCECMData.cpp:2812-2819). Without that message, en0 stayed dead
+ * after `ifconfig en0 down; ifconfig en0 up`.
+ *
+ * This object does what AppleUSBHubPort does for that path and nothing
+ * else:
+ *   SuspendPort()  a real hub-port suspend/resume
+ *                  (BCM2837DWC2::hubPortSuspend()). A resume that
+ *                  completes messages the device's clients
+ *                  kIOUSBMessagePortHasBeenResumed synchronously, as
+ *                  AppleUSBHubPort::MessageDeviceClients() does after the
+ *                  resume handler (AppleUSBHubPort.cpp:1258-1266, :2812).
+ *                  Resuming a port that is not suspended gives
+ *                  kIOUSBDevicePortWasNotSuspended (:1344-1351).
+ *   Request/ReturnExtraPower  the base class dereferences _device, the
+ *                  hub's own IOUSBHubDevice, which does not exist here.
+ *                  These return exactly what IOUSBDevice computes with no
+ *                  hub parent: 0 mA, and success.
+ * Everything else keeps the base class's kIOReturnUnsupported. The one
+ * behaviour change is IOUSBDevice::ResetDevice(): it now reports
+ * unsupported instead of a success for a reset that never happened.
+ *
+ * Never started or registered. It is a plain object that IOUSBDevice
+ * retains as its hub parent, not a node in the service or power planes.
+ */
+class BCM2837USBPortPolicy : public IOUSBHubPolicyMaker
+{
+	OSDeclareDefaultStructors(BCM2837USBPortPolicy);
+
+public:
+	static BCM2837USBPortPolicy *withDevice(BCM2837DWC2 *dwc2, IOUSBDevice *device,
+	    uint8_t address);
+
+	virtual bool		ConfigureHubDriver(void) override;
+	virtual IOReturn	HubPowerChange(unsigned long powerStateOrdinal) override;
+	virtual IOReturn	SuspendPort(UInt32 portNum, bool suspend) override;
+	virtual UInt32		RequestExtraPower(UInt32 portNum, UInt32 type, UInt32 requestedPower) override;
+	virtual IOReturn	ReturnExtraPower(UInt32 portNum, UInt32 type, UInt32 returnedPower) override;
+
+private:
+	BCM2837DWC2  *fDWC2;
+	IOUSBDevice  *fDevice;      // not retained: it retains us (SetHubParent)
+	uint8_t       fAddress;
 };
 
 class BCM2837USBHostController : public IOUSBControllerV2

@@ -374,6 +374,7 @@ struct USBHubDescriptor {
 enum {
 	kHubFeatPortConnection  = 0,
 	kHubFeatPortEnable      = 1,
+	kHubFeatPortSuspend     = 2,
 	kHubFeatPortReset       = 4,
 	kHubFeatPortPower       = 8,
 	kHubFeatCPortConnection = 16,
@@ -387,6 +388,7 @@ enum {
 enum {
 	kPortStatusConnection = 1U << 0,
 	kPortStatusEnable     = 1U << 1,
+	kPortStatusSuspend    = 1U << 2,
 	kPortStatusReset      = 1U << 4,
 	kPortStatusPower      = 1U << 8,
 	kPortStatusLowSpeed   = 1U << 9,
@@ -908,6 +910,18 @@ public:
 	bool     makeEndpoint(const DWC2USBDevice *dev, uint8_t epAddr, DWC2Endpoint *ep) const;
 
 	const DWC2USBDevice *deviceAt(uint32_t index) const;
+
+	/*
+	 * Selective suspend/resume of the hub port an enumerated device sits
+	 * on (USB 2.0 11.24.2.7.1.3 PORT_SUSPEND), for the UIM's hub policy
+	 * maker (DAR-372). Blocking: resume waits for the hub to finish
+	 * resume signalling and then the 10 ms recovery time. Must not be
+	 * called on the UIM's workloop thread. *wasSuspended reports, for a
+	 * resume, whether the port had been suspended at all.
+	 * kIOReturnUnsupported for a device on the root port: HPRT0.PRTSUSP is
+	 * not implemented.
+	 */
+	IOReturn hubPortSuspend(uint8_t deviceAddress, bool suspend, bool *wasSuspended);
 	uint32_t deviceCount(void) const { return fNumDevices; }
 
 	// Find the first enumerated device whose interface class matches, e.g.

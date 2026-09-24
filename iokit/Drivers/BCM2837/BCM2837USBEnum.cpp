@@ -23,6 +23,7 @@
  */
 
 #include "BCM2837DWC2.h"
+#include "SMSC9514USBTransport.h"
 
 // Enough for a full configuration descriptor with several interfaces and
 // endpoints; the LAN9514's is far smaller.

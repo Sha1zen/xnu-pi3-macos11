@@ -164,11 +164,13 @@ BCM2837CPU::initCPU(bool boot)
 	 * Run the handler once here, as this CPU's first IPI would, with
 	 * interrupts off as they are for a real IPI. With nothing pending it
 	 * only clears SIGPdisabled (its signal loop runs zero times).
-	 * Self-signals never checked the flag
-	 * (cpu_signal_internal(): Check_SIGPdisabled = 0 when target == self,
-	 * cpu_common.c:423-427), and there is no other CPU to signal this one,
-	 * so the one behaviour this changes is that cpu_idle() now reaches
-	 * WFI.
+	 *
+	 * What else this changes: signals cpu0 sends itself. Most never
+	 * checked the flag (cpu_signal_internal(): Check_SIGPdisabled = 0 when
+	 * target == self, cpu_common.c:423-427) and there is no other CPU to
+	 * signal this one. But a self-xcall (SIGPxcall/SIGPxcallImm) did check
+	 * it (cpu_common.c:430-435) and failed with KERN_FAILURE. It now
+	 * succeeds, so it must actually be delivered: see signalCPU() below.
 	 */
 	if (ipi_handler != NULL) {
 		boolean_t istate = ml_set_interrupts_enabled(FALSE);
@@ -375,4 +377,26 @@ BCM2837CPU::free(void)
 		fCPUName = NULL;
 	}
 	super::free();
+}
+
+/*
+ * DAR-375. IOCPU::signalCPU() is a no-op (iokit/Kernel/IOCPU.cpp:461); a real
+ * Apple CPU class sends an IPI. The only CPU this class ever runs is the boot
+ * CPU (cpu1-3 are parked), so the only signal it can be asked to send is one
+ * to itself, and cpu_signal_internal() has already posted the signal bits and
+ * xcall arguments before calling PE_cpu_signal() -> here
+ * (osfmk/arm/cpu_common.c:429-498). Deliver that self-IPI by running the IPI
+ * handler (cpu_signal_handler) now, with interrupts off as a real IPI would.
+ * Without this, a self-xcall that succeeds now that SIGPdisabled is clear
+ * (see initCPU()) would sit pending with nothing to run it.
+ */
+void
+BCM2837CPU::signalCPU(IOCPU *target)
+{
+	if (target != this || ipi_handler == NULL) {
+		return;
+	}
+	boolean_t istate = ml_set_interrupts_enabled(FALSE);
+	ipi_handler();
+	ml_set_interrupts_enabled(istate);
 }

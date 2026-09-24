@@ -132,6 +132,7 @@ struct DWC2UIMTransfer
 	// normal and unbounded for an IN transfer, from "this transfer is wedged",
 	// which has to fail eventually for control and OUT transfers.
 	uint64_t             stallStart;
+	UInt32               xactErrors;    // consecutive XACTERRs on a parked chunk
 	UInt8                pid;
 	bool                 usePid;       // control stage: drive `pid`, not the endpoint toggle
 	bool                 isIn;
@@ -324,6 +325,7 @@ private:
 	// Poked by BCM2837DWC2::interruptOccurred() when a parked channel halts.
 	// Runs asyncEventFired() on this controller's workloop.
 	IOInterruptEventSource *fAsyncEvent;
+	bool                 fAsyncEventDeferred;  // doorbell rang inside an fInEngine section
 
 	// Root-hub interrupt (status change) pipe, endpoint 1. Nothing in this
 	// kernel opens it - AppleUSBHub is not vendored - but a queued read must
@@ -341,6 +343,8 @@ private:
 	// Parked async bulk IN (DAR-370). See "PARKED BULK IN" in the .cpp.
 	bool			startAsync(DWC2UIMEndpoint *ep);
 	void			kickAsync(void);
+	void			leaveEngine(void);
+	void			collectAllAsync(void);
 	bool			collectAsync(DWC2UIMEndpoint *ep, bool abort);
 	static void		asyncEventFired(OSObject *owner, IOInterruptEventSource *sender, int count);
 

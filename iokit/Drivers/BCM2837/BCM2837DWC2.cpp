@@ -1,8 +1,7 @@
 /*
  * BCM2837 DWC2 USB 2.0 OTG host controller. See BCM2837DWC2.h for scope,
- * references, and known limitations - in particular that transfer
- * completion is polled rather than interrupt-driven in this first cut, on
- * purpose.
+ * references, and known limitations. (Completion has been interrupt-driven
+ * since DAR-136, and parked async IN transfers exist since DAR-370.)
  */
 
 #include "BCM2837DWC2.h"
@@ -34,7 +33,8 @@ OSDefineMetaClassAndStructors(BCM2837DWC2, IOService);
 // reliable.
 #define kDWC2DataBufferSize     (64 * 1024)
 
-// Only channel 0 is used - see BCM2837DWC2.h on why one channel, for now.
+// The synchronous path's channel. Channels 1..fAsyncChannelCount carry
+// parked async IN transfers (DAR-370) - see BCM2837DWC2.h.
 #define kDWC2Channel            0
 
 // Per-chunk ceiling from the silicon's own counters, mirroring u-boot's
@@ -166,9 +166,12 @@ BCM2837DWC2::waitForAnyBits(uint32_t offset, uint32_t mask, uint32_t timeoutMS)
  * Scans HAINT for every channel (DAR-370). Channel 0 is the synchronous
  * path, and channels 1..fAsyncChannelCount carry parked async IN
  * transfers. For those, the handler also pokes the UIM's
- * IOInterruptEventSource: IOInterruptEventSource::interruptOccurred() is
- * the primary-interrupt entry point of that class (it only bumps
- * producerCount and signals the workloop), so it is safe to call here.
+ * IOInterruptEventSource. With no provider, interruptOccurred() goes
+ * straight to normalInterruptOccurred() (third_party/xnu-7195/iokit/Kernel/
+ * IOInterruptEventSource.cpp:520-528). That only bumps producerCount,
+ * records statistics and calls signalWorkAvailable() (:460-486), the same
+ * work it does when a provider's interrupt controller calls it at primary
+ * interrupt level, so it is safe to call here.
  */
 void
 BCM2837DWC2::interruptOccurred(OSObject *target, void * /*refCon*/, IOService * /*nub*/, int /*source*/)
@@ -690,39 +693,72 @@ BCM2837DWC2::allocateDMABuffer(void)
 	 * The mask bounds the allocation to the low 1GB - all the DRAM this
 	 * board has, and all that the 0xc0000000 bus alias can reach.
 	 */
-	fDMABuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+	if (!allocateContiguousDMA(kDWC2DataBufferSize, "DMA buffer", &fDMABuffer,
+	    &fDMAVirt, &fDMABusAddr)) {
+		return false;
+	}
+
+	IOLog("BCM2837DWC2: DMA buffer virt=%p bus=%#llx len=%u\n",
+	    fDMAVirt, fDMABusAddr, kDWC2DataBufferSize);
+
+	return true;
+}
+
+/*
+ * The allocation recipe allocateDMABuffer()'s comment explains, for any
+ * size. On failure nothing is left allocated.
+ */
+bool
+BCM2837DWC2::allocateContiguousDMA(uint32_t size, const char *what,
+    IOBufferMemoryDescriptor **bmdOut, void **virtOut, uint64_t *busOut)
+{
+	IOBufferMemoryDescriptor *bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
 	    kernel_task,
 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous |
 	    kIOMapWriteCombineCache | kIOMemoryMapperNone,
-	    kDWC2DataBufferSize,
+	    size,
 	    0x3FFFFFFFULL & ~0x3ULL); // 4-byte aligned, DWC2 requires it
-
-	if (fDMABuffer == NULL) {
-		IOLog("BCM2837DWC2: DMA buffer allocation failed\n");
+	if (bmd == NULL) {
+		IOLog("BCM2837DWC2: %s allocation failed\n", what);
 		return false;
 	}
-
-	if (fDMABuffer->prepare() != kIOReturnSuccess) {
-		IOLog("BCM2837DWC2: DMA buffer prepare() failed\n");
+	if (bmd->prepare() != kIOReturnSuccess) {
+		IOLog("BCM2837DWC2: %s prepare() failed\n", what);
+		bmd->release();
 		return false;
 	}
-
-	fDMAVirt = fDMABuffer->getBytesNoCopy();
 
 	IOByteCount segLen = 0;
-	IOPhysicalAddress phys = fDMABuffer->getPhysicalSegment(0, &segLen, 0);
-	if (phys == 0 || segLen < kDWC2DataBufferSize) {
-		IOLog("BCM2837DWC2: DMA buffer not usable (phys=%#llx seglen=%llu)\n",
-		    (uint64_t)phys, (uint64_t)segLen);
+	IOPhysicalAddress phys = bmd->getPhysicalSegment(0, &segLen, 0);
+	if (phys == 0 || segLen < size) {
+		IOLog("BCM2837DWC2: %s not usable (phys=%#llx seglen=%llu)\n",
+		    what, (uint64_t)phys, (uint64_t)segLen);
+		bmd->complete();
+		bmd->release();
 		return false;
 	}
 
-	fDMABusAddr = kBCM2837BusAddressBase | (uint64_t)phys;
-
-	IOLog("BCM2837DWC2: DMA buffer virt=%p phys=%#llx bus=%#llx len=%u\n",
-	    fDMAVirt, (uint64_t)phys, fDMABusAddr, kDWC2DataBufferSize);
-
+	*bmdOut = bmd;
+	*virtOut = bmd->getBytesNoCopy();
+	*busOut = kBCM2837BusAddressBase | (uint64_t)phys;
 	return true;
+}
+
+// Bytes an IN channel has received so far, from HCTSIZ.XFERSIZE counting
+// down from what it was armed with.
+uint32_t
+BCM2837DWC2::channelInBytesDone(uint32_t chan, uint32_t xferLen) const
+{
+	uint32_t remaining = regRead(hcOffset(chan, kDWC2_HCTSIZ)) & kHCTSIZ_XFERSIZE_MASK;
+	return (remaining <= xferLen) ? (xferLen - remaining) : 0;
+}
+
+// HCTSIZ.PID: the data toggle the core expects next on this channel.
+uint8_t
+BCM2837DWC2::channelNextPid(uint32_t chan) const
+{
+	return (uint8_t)((regRead(hcOffset(chan, kDWC2_HCTSIZ)) & kHCTSIZ_PID_MASK) >>
+	    kHCTSIZ_PID_SHIFT);
 }
 
 #pragma mark - Transfer engine
@@ -983,7 +1019,7 @@ BCM2837DWC2::decodeChannelResult(uint32_t chan, uint32_t hcint, uint32_t xferLen
 		 * "ping: sendto: Operation not permitted" for each one.
 		 */
 		if (isIn) {
-			*actualLen = (remaining <= xferLen) ? (xferLen - remaining) : 0;
+			*actualLen = channelInBytesDone(chan, xferLen);
 		} else {
 			*actualLen = xferLen;
 		}
@@ -1238,8 +1274,7 @@ BCM2837DWC2::doTransfer(DWC2Endpoint *ep, uint8_t *pid, bool isIn,
 			// Flip the sequence bit for the next packet, unless this was
 			// a SETUP (which always starts DATA0 on the next stage and
 			// is driven explicitly by controlTransfer).
-			uint32_t hctsiz = regRead(hcOffset(kDWC2Channel, kDWC2_HCTSIZ));
-			*pid = (hctsiz & kHCTSIZ_PID_MASK) >> kHCTSIZ_PID_SHIFT;
+			*pid = channelNextPid(kDWC2Channel);
 		}
 	} while (((done < len) && !stopTransfer) || completeSplit);
 
@@ -1418,47 +1453,19 @@ BCM2837DWC2::transferStage(DWC2Endpoint *ep, uint8_t *pid, bool isIn,
 #pragma mark - Parked asynchronous IN transfers (DAR-370)
 
 /*
- * Same allocation recipe as allocateDMABuffer() (see its comment for the
- * memory type, mapper and mask), sized for one kDWC2AsyncBufferSize slice
- * per async channel. Failure is not fatal: with no buffer,
- * fAsyncChannelCount stays 0 and every IN transfer uses channel 0 as
- * before.
+ * One kDWC2AsyncBufferSize slice per async channel. Failure is not fatal:
+ * with no buffer, fAsyncChannelCount stays 0 and every IN transfer uses
+ * channel 0 as before.
  */
 bool
 BCM2837DWC2::allocateAsyncDMABuffer(void)
 {
-	const uint32_t size = kDWC2AsyncChannels * kDWC2AsyncBufferSize;
-
-	fAsyncDMABuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-	    kernel_task,
-	    kIODirectionInOut | kIOMemoryPhysicallyContiguous |
-	    kIOMapWriteCombineCache | kIOMemoryMapperNone,
-	    size,
-	    0x3FFFFFFFULL & ~0x3ULL);
-	if (fAsyncDMABuffer == NULL) {
-		IOLog("BCM2837DWC2: async DMA buffer allocation failed - "
-		      "IN transfers stay on channel 0\n");
+	void *virt = NULL;
+	if (!allocateContiguousDMA(kDWC2AsyncChannels * kDWC2AsyncBufferSize,
+	    "async DMA buffer", &fAsyncDMABuffer, &virt, &fAsyncDMABusAddr)) {
 		return false;
 	}
-	if (fAsyncDMABuffer->prepare() != kIOReturnSuccess) {
-		fAsyncDMABuffer->release();
-		fAsyncDMABuffer = NULL;
-		return false;
-	}
-
-	IOByteCount segLen = 0;
-	IOPhysicalAddress phys = fAsyncDMABuffer->getPhysicalSegment(0, &segLen, 0);
-	if (phys == 0 || segLen < size) {
-		IOLog("BCM2837DWC2: async DMA buffer not usable (phys=%#llx seglen=%llu)\n",
-		    (uint64_t)phys, (uint64_t)segLen);
-		fAsyncDMABuffer->complete();
-		fAsyncDMABuffer->release();
-		fAsyncDMABuffer = NULL;
-		return false;
-	}
-
-	fAsyncDMAVirt = (uint8_t *)fAsyncDMABuffer->getBytesNoCopy();
-	fAsyncDMABusAddr = kBCM2837BusAddressBase | (uint64_t)phys;
+	fAsyncDMAVirt = (uint8_t *)virt;
 	return true;
 }
 
@@ -1586,6 +1593,13 @@ BCM2837DWC2::asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
 	uint32_t actual = 0;
 	IOReturn ret;
 
+	// While parked, every NAK the device answered with still latched
+	// HCINT.NAK (HCINTMSK gates only the interrupt; QEMU's model ORs it in
+	// on each retry, hcd-dwc2.c:359-368). Those NAKs are history, not the
+	// outcome, and decodeChannelResult() tests NAK before STALL and the
+	// errors, so they have to go before it sees the bits.
+	hcint &= ~(kHCINT_NAK | kHCINT_NYET);
+
 	const uint32_t kOutcomeBits = kHCINT_XFERCOMP | kHCINT_STALL | kHCINT_XACTERR |
 	    kHCINT_BBLERR | kHCINT_AHBERR | kHCINT_DATATGLERR | kHCINT_FRMOVRUN;
 	if (hcint & kOutcomeBits) {
@@ -1600,8 +1614,7 @@ BCM2837DWC2::asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
 		// Packets that arrived before an abort or error are real and
 		// already acknowledged, so count them from HCTSIZ the same way
 		// decodeChannelResult() does for a completed IN.
-		uint32_t remaining = regRead(hcOffset(chan, kDWC2_HCTSIZ)) & kHCTSIZ_XFERSIZE_MASK;
-		actual = (remaining <= xferLen) ? (xferLen - remaining) : 0;
+		actual = channelInBytesDone(chan, xferLen);
 	}
 
 	if (actual > dstLen) {
@@ -1620,8 +1633,7 @@ BCM2837DWC2::asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
 	// HCTSIZ.PID is the toggle the core expects next, whatever happened:
 	// unchanged if nothing arrived, advanced past every packet that did.
 	// doTransfer() takes it the same way.
-	uint32_t hctsiz = regRead(hcOffset(chan, kDWC2_HCTSIZ));
-	ep->toggle = (uint8_t)((hctsiz & kHCTSIZ_PID_MASK) >> kHCTSIZ_PID_SHIFT);
+	ep->toggle = channelNextPid(chan);
 
 	asyncRelease(chan);
 
@@ -1631,9 +1643,10 @@ BCM2837DWC2::asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
 
 bool
 BCM2837DWC2::asyncCollect(int chanIn, DWC2Endpoint *ep, void *dst, uint32_t dstLen,
-    uint32_t *actualLen, IOReturn *status)
+    uint32_t *actualLen, IOReturn *status, uint32_t *hcintOut)
 {
 	*actualLen = 0;
+	*hcintOut = 0;
 	if (chanIn <= 0 || (uint32_t)chanIn > fAsyncChannelCount || !fAsyncBusy[chanIn]) {
 		*status = kIOReturnBadArgument;
 		return true;
@@ -1660,6 +1673,7 @@ BCM2837DWC2::asyncCollect(int chanIn, DWC2Endpoint *ep, void *dst, uint32_t dstL
 		return false;
 	}
 
+	*hcintOut = hcint & ~(kHCINT_NAK | kHCINT_NYET);
 	*status = asyncFinish(chan, ep, hcint, dst, dstLen, actualLen);
 	return true;
 }
@@ -1685,8 +1699,7 @@ BCM2837DWC2::asyncAbort(int chanIn, DWC2Endpoint *ep, void *dst, uint32_t dstLen
 	if (fAsyncWedged[chan]) {
 		// haltChannel() gave up on it. Free the bookkeeping, not the
 		// channel: fAsyncWedged keeps asyncStart() away from it for good.
-		ep->toggle = (uint8_t)((regRead(hcOffset(chan, kDWC2_HCTSIZ)) &
-		    kHCTSIZ_PID_MASK) >> kHCTSIZ_PID_SHIFT);
+		ep->toggle = channelNextPid(chan);
 		asyncRelease(chan);
 		return kIOReturnNotResponding;
 	}
@@ -1869,14 +1882,15 @@ BCM2837DWC2::start(IOService *provider)
 	IOLog("BCM2837DWC2: core init done, %u host channels\n", fNumChannels);
 
 	// DAR-370: lend channels 1..N to parked async IN transfers.
+	// dwc2-no-async=1 (or a bare dwc2-no-async) keeps every transfer on
+	// channel 0, as before DAR-370.
 	fAsyncChannelCount = 0;
-	if (allocateAsyncDMABuffer()) {
-		uint32_t spare = (fNumChannels > 1) ? fNumChannels - 1 : 0;
+	int noAsync = 0;
+	bool asyncOff = PE_parse_boot_argn("dwc2-no-async", &noAsync, sizeof(noAsync)) &&
+	    noAsync != 0;
+	uint32_t spare = (fNumChannels > 1) ? fNumChannels - 1 : 0;
+	if (!asyncOff && spare > 0 && allocateAsyncDMABuffer()) {
 		fAsyncChannelCount = (spare < kDWC2AsyncChannels) ? spare : kDWC2AsyncChannels;
-		int noAsync = 0;
-		if (PE_parse_boot_argn("dwc2-no-async", &noAsync, sizeof(noAsync))) {
-			fAsyncChannelCount = 0;
-		}
 	}
 	IOLog("BCM2837DWC2: %u channel(s) for parked async IN transfers\n",
 	    fAsyncChannelCount);

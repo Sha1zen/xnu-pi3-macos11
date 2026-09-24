@@ -81,8 +81,16 @@
  *     reference_qemu_lan9514_never_emulated) and real-hardware time was not
  *     available this session (DAR-351).
  *   - Isochronous transfers are unimplemented and will not be: no consumer.
- *   - One transfer at a time on the single active channel, no queueing
- *     across channels, no cross-channel async completion callbacks.
+ *   - UPDATE (DAR-370): no longer strictly one channel. Channel 0 is still
+ *     the synchronous path for everything above (control, OUT, interrupt,
+ *     split, and all of SMSC9514Ethernet's traffic). But channels
+ *     1..kDWC2AsyncChannels can now each hold one parked, non-split bulk
+ *     IN transfer for the IOUSBFamily UIM, with completion by interrupt
+ *     (asyncStart() and friends, see the public header section). That is
+ *     the mechanism DAR-351's "second channel dedicated to RX" needs, but
+ *     SMSC9514Ethernet does not use it yet: its RX still polls channel 0.
+ *     Not done: periodic (interrupt-endpoint) scheduling in hardware, and
+ *     split transactions on a parked channel.
  */
 
 #ifndef _BCM2837_DWC2_H
@@ -706,6 +714,10 @@ private:
 
 	bool allocateDMABuffer(void);
 	bool allocateAsyncDMABuffer(void);
+	bool allocateContiguousDMA(uint32_t size, const char *what,
+	    IOBufferMemoryDescriptor **bmdOut, void **virtOut, uint64_t *busOut);
+	uint32_t channelInBytesDone(uint32_t chan, uint32_t xferLen) const;
+	uint8_t  channelNextPid(uint32_t chan) const;
 	void asyncRelease(uint32_t chan);
 	IOReturn asyncFinish(uint32_t chan, DWC2Endpoint *ep, uint32_t hcint,
 	    void *dst, uint32_t dstLen, uint32_t *actualLen);
@@ -822,7 +834,9 @@ public:
 	 * that every frame. In buffer-DMA mode the core retries a NAKed
 	 * non-periodic transaction by itself for as long as the channel stays
 	 * enabled (waitForChannelSettled()'s comment; QEMU's model does the
-	 * same, hcd-dwc2.c "for ctrl/bulk, automatically retry on NAK").
+	 * same, third_party/qemu-zhuowei/hw/usb/hcd-dwc2.c:359-368 "for
+	 * ctrl/bulk, automatically retry on NAK"). Not yet confirmed on real
+	 * BCM2837 silicon for a parked channel.
 	 * With only CHHLTD unmasked in HCINTMSK, a NAK raises no interrupt,
 	 * and the channel halts with XFERCOMP when the data arrives.
 	 *
@@ -853,8 +867,10 @@ public:
 	int      asyncStart(DWC2Endpoint *ep, uint32_t len, uint32_t *xferLenOut);
 	// false: still parked. true: finished, the channel is free again,
 	// *status/*actualLen are set and up to dstLen bytes were copied to dst.
+	// *hcint is the halt's HCINT (latched NAKs removed), so a caller can
+	// tell a transient XACTERR from other errors and retry it.
 	bool     asyncCollect(int chan, DWC2Endpoint *ep, void *dst, uint32_t dstLen,
-	                      uint32_t *actualLen, IOReturn *status);
+	                      uint32_t *actualLen, IOReturn *status, uint32_t *hcint);
 	// Halt a parked transfer and free its channel. Bytes that had already
 	// arrived are copied out and reported, because the data toggle has
 	// already moved past them.

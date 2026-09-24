@@ -211,6 +211,7 @@ BCM2837USBHostController::init(OSDictionary *propTable)
 	fAsyncEvents = 0;
 	fAsyncPolled = 0;
 	fAsyncEvent = NULL;
+	fAsyncEventDeferred = false;
 	fRootHubIntPending = false;
 	bzero(&fRootHubIntCompletion, sizeof(fRootHubIntCompletion));
 
@@ -237,7 +238,19 @@ void
 BCM2837USBHostController::free(void)
 {
 	// UIMFinalize() does the real teardown; this is the belt-and-braces path
-	// for a controller that failed part-way through start().
+	// for a controller that failed part-way through start(). Stop the
+	// engine first, so returnTransfers() below cannot park anything new,
+	// and take back whatever is parked before the doorbell goes away.
+	fEngineRunning = false;
+	for (DWC2UIMEndpoint *ep = fEndpoints; ep != NULL; ep = ep->next) {
+		if (ep->asyncChan >= 0) {
+			collectAsync(ep, true);
+		}
+	}
+	if (fDWC2 != NULL) {
+		fDWC2->setAsyncNotify(NULL);
+	}
+
 	while (fEndpoints != NULL) {
 		DWC2UIMEndpoint *ep = fEndpoints;
 		fEndpoints = ep->next;
@@ -528,10 +541,43 @@ BCM2837USBHostController::returnTransfers(DWC2UIMEndpoint *ep, IOReturn status)
 	}
 
 	if (outermost) {
-		fInEngine = false;
-		kickAsync();
-		rearmEngine();
+		leaveEngine();
 	}
+}
+
+/*
+ * The one way out of an fInEngine section. An async doorbell that rang
+ * while the section held fInEngine (asyncEventFired() had to skip it) is
+ * serviced here rather than left to the 1 s fallback. Then anything the
+ * section's completions queued is parked or scheduled.
+ */
+void
+BCM2837USBHostController::leaveEngine(void)
+{
+	fInEngine = false;
+	while (fAsyncEventDeferred && fEngineRunning) {
+		fAsyncEventDeferred = false;
+		collectAllAsync();
+	}
+	kickAsync();
+	rearmEngine();
+}
+
+/*
+ * Collect every parked endpoint whose channel has halted. Sets fInEngine
+ * around the completions it delivers, and leaves through leaveEngine()'s
+ * caller.
+ */
+void
+BCM2837USBHostController::collectAllAsync(void)
+{
+	fInEngine = true;
+	for (DWC2UIMEndpoint *ep = fEndpoints; ep != NULL; ep = ep->next) {
+		if (!ep->retired && ep->asyncChan >= 0 && collectAsync(ep, false)) {
+			fAsyncEvents++;
+		}
+	}
+	fInEngine = false;
 }
 
 /*
@@ -615,9 +661,15 @@ BCM2837USBHostController::enqueueTransfer(DWC2UIMEndpoint *ep, IOUSBCompletion c
 	// this endpoint is next due. Inside the engine (or inside
 	// returnTransfers()), the kickAsync()/rearmEngine() at the end of the
 	// pass picks it up instead.
-	if (!fInEngine && !startAsync(ep)) {
+	if (!fInEngine) {
 		uint64_t now = nowAbs();
-		armEngine((ep->nextDue > now) ? ep->nextDue : now);
+		if (startAsync(ep)) {
+			// Parked. Make sure the lost-interrupt fallback pass is
+			// scheduled; armEngine() keeps an earlier deadline if one is set.
+			armEngine(now + usToAbs(kAsyncPollFallbackMS * 1000U));
+		} else {
+			armEngine((ep->nextDue > now) ? ep->nextDue : now);
+		}
 	}
 
 	return kIOReturnSuccess;
@@ -786,10 +838,7 @@ BCM2837USBHostController::processQueues(void)
 		scheduleNext(ep, now, progressed);
 	}
 
-	fInEngine = false;
-
-	kickAsync();
-	rearmEngine();
+	leaveEngine();
 }
 
 /*
@@ -877,11 +926,12 @@ BCM2837USBHostController::collectAsync(DWC2UIMEndpoint *ep, bool abort)
 	}
 
 	uint32_t actual = 0;
+	uint32_t hcint = 0;
 	IOReturn status;
 	if (abort) {
 		status = fDWC2->asyncAbort(ep->asyncChan, &ep->dep, fStaging, fStagingSize, &actual);
 	} else if (!fDWC2->asyncCollect(ep->asyncChan, &ep->dep, fStaging, fStagingSize,
-	    &actual, &status)) {
+	    &actual, &status, &hcint)) {
 		return false;
 	}
 	ep->asyncChan = -1;
@@ -911,11 +961,22 @@ BCM2837USBHostController::collectAsync(DWC2UIMEndpoint *ep, bool abort)
 	}
 
 	if (status == kIOReturnSuccess) {
+		xfer->xactErrors = 0;
 		// Short packet, or everything asked for: done. Otherwise the next
 		// chunk is parked by kickAsync() after this pass.
 		if (xfer->done >= xfer->length || actual < ep->asyncReq) {
 			completeHead(ep, kIOReturnSuccess);
 		}
+		return true;
+	}
+
+	// A transaction error gets the same three tries doTransfer() gives it
+	// (its XACTERR comment: transient, and confirmed on the real LAN9514).
+	// Re-parking resumes at xfer->done with the toggle the channel left.
+	if ((hcint & kHCINT_XACTERR) && xfer->done < xfer->length &&
+	    ++xfer->xactErrors < 3) {
+		IOLog("BCM2837USBHostController: XACTERR on async %u.%u, attempt %u/3, "
+		    "re-parking\n", ep->functionNumber, ep->endpointNumber, xfer->xactErrors);
 		return true;
 	}
 
@@ -933,20 +994,19 @@ BCM2837USBHostController::asyncEventFired(OSObject *owner, IOInterruptEventSourc
 {
 #pragma unused (sender, count)
 	BCM2837USBHostController *me = OSDynamicCast(BCM2837USBHostController, owner);
-	if (me == NULL || me->fInEngine) {
+	if (me == NULL) {
+		return;
+	}
+	if (me->fInEngine) {
+		// A completion further up this thread gave up the gate. The
+		// producer count is already consumed, so remember the doorbell;
+		// that section's leaveEngine() services it.
+		me->fAsyncEventDeferred = true;
 		return;
 	}
 
-	me->fInEngine = true;
-	for (DWC2UIMEndpoint *ep = me->fEndpoints; ep != NULL; ep = ep->next) {
-		if (!ep->retired && ep->asyncChan >= 0 && me->collectAsync(ep, false)) {
-			me->fAsyncEvents++;
-		}
-	}
-	me->fInEngine = false;
-
-	me->kickAsync();
-	me->rearmEngine();
+	me->collectAllAsync();
+	me->leaveEngine();
 }
 
 /*
@@ -1024,8 +1084,17 @@ BCM2837USBHostController::rearmEngine(void)
 	bool any = false;
 	uint64_t earliest = 0;
 	bool parked = false;
+	bool reap = false;
 	for (DWC2UIMEndpoint *ep = fEndpoints; ep != NULL; ep = ep->next) {
 		if (ep->retired) {
+			// Deleted endpoints are freed at the top of the next engine
+			// pass, from the timer, where no caller can still hold one.
+			// So a pass is needed even if nothing else is queued. Only
+			// for one reapRetiredEndpoints() can actually free (head
+			// empty), or this would re-arm for "now" forever.
+			if (ep->head == NULL) {
+				reap = true;
+			}
 			continue;
 		}
 		if (ep->asyncChan >= 0) {
@@ -1037,6 +1106,13 @@ BCM2837USBHostController::rearmEngine(void)
 		}
 		if (!any || ep->nextDue < earliest) {
 			earliest = ep->nextDue;
+			any = true;
+		}
+	}
+	if (reap) {
+		uint64_t now = nowAbs();
+		if (!any || now < earliest) {
+			earliest = now;
 			any = true;
 		}
 	}
@@ -1295,11 +1371,15 @@ BCM2837USBHostController::UIMClearEndpointStall(short functionNumber, short endp
 	collectAsync(ep, true);
 	ep->nextDue = 0;
 	ep->backoffUS = 0;
-	returnTransfers(ep, kIOUSBTransactionReturned);
 	// USB 2.0 9.4.5: clearing a halt resets the endpoint's data toggle to
 	// DATA0 on both sides. The device half is done by the CLEAR_FEATURE the
-	// pipe layer sends; this is the host half.
+	// pipe layer sends; this is the host half. Before returnTransfers(),
+	// not after: a read the client re-queues from its Returned completion
+	// is parked (kickAsync()) as returnTransfers() leaves, and must start
+	// from DATA0. After the parked channel was taken back above, nothing
+	// else writes the toggle.
 	ep->dep.toggle = kHCPID_DATA0;
+	returnTransfers(ep, kIOUSBTransactionReturned);
 	return kIOReturnSuccess;
 }
 

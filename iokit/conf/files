@@ -195,3 +195,19 @@ iokit/Drivers/AppleUSBCDC/AppleUSBCDC.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBCDC/AppleUSBCDCECMControl.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBCDC/AppleUSBCDCECMData.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBCDC/MsgTrace.c		optional iokitcpp
+
+# --- Graphics (IOGraphics-585), vendored by tools/vendor_iographics_into_xnu.sh ---
+iokit/Graphics/IOGraphicsFamily/IOFramebuffer.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IOBootFramebuffer.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IOFramebufferUserClient.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IODisplayWrangler.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IODisplayWranglerUserClients.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IODisplay.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IOGraphicsDevice.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IOI2CInterface.cpp		optional iokitcpp
+iokit/Graphics/IOGraphicsFamily/IOBacklightDisplay.cpp		optional iokitcpp
+iokit/Graphics/GMetric/GMetric.cpp		optional iokitcpp
+iokit/Graphics/GTrace/Kernel/GTrace.cpp		optional iokitcpp
+iokit/Graphics/tl/osmemory.cpp		optional iokitcpp
+iokit/Graphics/lzvn/lzvn_decode_base.c		optional iokitcpp
+iokit/Graphics/lzvn/IOGraphicsLZVN.c		optional iokitcpp

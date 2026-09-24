@@ -52,8 +52,8 @@ OSDefineMetaClassAndStructors(BCM2837USBHostController, IOUSBControllerV2);
  *              AppleUSBEHCI_UIM.cpp:2629-2643 decodes it as: 2^(bInterval-1)
  *              microframes at high speed, bInterval frames (ms) at full or
  *              low speed. HID keyboards ask for 8-10 ms, hubs up to 255 ms.
- *   bulk IN    kBulkInBackoffMaxUS. This is a policy, not a
- *              USB rule, because a bulk endpoint has no polling interval.
+ *   bulk IN    a NAK back-off capped at kBulkInBackoffMaxUS. This is a
+ *              policy, not a USB rule: a bulk endpoint has no interval.
  *              A real EHCI walks its async schedule continuously in
  *              hardware. The DWC2 can also retry a NAKed non-periodic IN
  *              by itself (BCM2837DWC2.cpp, waitForChannelSettled()'s
@@ -306,7 +306,7 @@ BCM2837USBHostController::UIMInitialize(IOService *provider)
 	fEngineStats = PE_parse_boot_argn("usb-engine-stats", &stats, sizeof(stats)) && stats != 0;
 
 	// Nothing is queued yet, so the engine starts parked. The first
-	// UIMCreate*Transfer arms it (enqueueTransfer() -> rearmEngine()).
+	// UIMCreate*Transfer arms it (enqueueTransfer() -> armEngine()).
 	fEngineRunning = true;
 	fArmedDeadline = 0;
 

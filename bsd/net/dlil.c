@@ -7632,7 +7632,15 @@ if_purgeaddrs(struct ifnet *ifp)
 #if INET
 	in_purgeaddrs(ifp);
 #endif /* INET */
-	in6_purgeaddrs(ifp);
+	/*
+	 * DAR-373: in6_purgeif() takes in6_ifaddr_rwlock, which only
+	 * ip6_init() initializes; with the PF_INET6 domain not attached (see
+	 * the mld_domifdetach() guard in ifnet_detach()) there are no IPv6
+	 * addresses to purge and the lock does not exist.
+	 */
+	if (inet6domain != NULL) {
+		in6_purgeaddrs(ifp);
+	}
 }
 
 errno_t
@@ -7816,7 +7824,21 @@ ifnet_detach(ifnet_t ifp)
 #if INET
 	igmp_domifdetach(ifp);
 #endif /* INET */
-	mld_domifdetach(ifp);
+	/*
+	 * DAR-373: only if the PF_INET6 domain was initialized. It is not
+	 * attached in this kernel (uipc_domain.c, "INET6 stays off
+	 * deliberately"), so mld_init() never ran and mld_mtx was never
+	 * initialized: this call panicked "Invalid mutex" on the first
+	 * ifnet_detach() this project ever made (USB re-enumeration of
+	 * CDC-ECM). The attach side is already off for the same reason (the
+	 * `if (0)` around mld_domifattach() above), so there is no MLD state
+	 * to drain. inet6domain is set by in6_dinit() (in6_proto.c), which
+	 * runs just before the protocol inits that call ip6_init() and, via
+	 * icmp6_init(), mld_init(); so it is non-NULL exactly when MLD is up.
+	 */
+	if (inet6domain != NULL) {
+		mld_domifdetach(ifp);
+	}
 
 	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_IF_DETACHING, NULL, 0);
 

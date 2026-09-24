@@ -335,9 +335,9 @@ addIOGraphicsPersonalities(OSArray *personalities)
  * IOHIDFamily.xcodeproj), so unlike IOGraphics nothing has to run first.
  *
  * Keys reach the console through IOHIDEventService's legacy keyboard shim
- * (IOHIDKeyboard -> IOHIDSystem -> cons_cinput, IOHIDSystem.cpp:2308-2317).
+ * (IOHIDKeyboard -> IOHIDSystem -> cons_cinput, IOHIDSystem.cpp:2309-2317).
  * The shim is off unless boot-arg hid-legacy-shim=1 or single-user
- * (IOHIDEventService.cpp:310-331); runvm_hdmi.sh passes the boot-arg.
+ * (IOHIDEventService.cpp:311-330); runvm_hdmi.sh passes the boot-arg.
  */
 static const char kIOHIDPersonalitiesXML[] =
     "<array><dict><key>HIDPowerOnDelayNS</key><integer>500000000</integer>"

@@ -317,6 +317,12 @@ addIOGraphicsPersonalities(OSArray *personalities)
  *                        GD/Keypad). Its IOMatchDefer is inert here:
  *                        NO_KEXTD compiles the defer path out
  *                        (IOService.cpp:3969).
+ *   IOUSBCompositeDriver IOUSBFamily-560.4.2 IOUSBCompositeDriver.plist
+ *                        "IOUSBComposite" (IOUSBDevice, bDeviceClass 0 /
+ *                        bDeviceSubClass 0: class defined per interface, which is
+ *                        what keyboards report). It SetConfiguration()s the
+ *                        device, which is what creates the IOUSBInterface nubs
+ *                        below. Nothing else does that for a generic device.
  *   IOUSBHIDDriver x2    IOUSBFamily-560.4.2 IOUSBHIDDriverSafeBoot.plist
  *                        "IOUSBHIDDriver0"/"IOUSBHIDDriver1": any
  *                        IOUSBInterface with bInterfaceClass 3 and subclass 0
@@ -402,7 +408,11 @@ static const char kIOHIDPersonalitiesXML[] =
     "</integer></dict><dict><key>HIDDefaultBehavior</key><string></string><key>IOClass</key>"
     "<string>IOUSBHIDDriver</string><key>IOProviderClass</key><string>IOUSBInterface</string>"
     "<key>bInterfaceClass</key><integer>3</integer><key>bInterfaceSubClass</key><integer>1"
-    "</integer></dict></array>";
+    "</integer></dict>"
+    "<dict><key>IOClass</key><string>IOUSBCompositeDriver</string>"
+    "<key>IOProviderClass</key><string>IOUSBDevice</string>"
+    "<key>bDeviceClass</key><integer>0</integer>"
+    "<key>bDeviceSubClass</key><integer>0</integer></dict></array>";
 
 static void
 addIOHIDPersonalities(OSArray *personalities)

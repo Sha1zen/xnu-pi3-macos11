@@ -41,6 +41,7 @@ extern "C" {
 #include <net/kpi_interface.h>
 #include <net/ethernet.h>
 #include <sys/kern_event.h>
+#include <net/if_var.h>
 
 #define _IP_VHL
 
@@ -1063,11 +1064,25 @@ bool IONetworkInterface::inputEvent(UInt32 type, void * data)
 {
     bool      success = true;
 
-    struct {
+    /*
+     * The header is followed by a struct net_event_data, the payload every
+     * KEV_NETWORK_CLASS event starts with (bsd/net/if_var.h; dlil_post_msg()
+     * in bsd/net/dlil.c builds the same thing). Laid out by
+     * KEV_MSG_HEADER_SIZE rather than by nesting after kern_event_msg: the
+     * kernel is built with XNU_KERN_EVENT_DATA_IS_VLA (makedefs/MakeInc.def),
+     * so event_data[] has no storage here, unlike the event_data[1] a
+     * separately built kext sees. The old header/unit/if_name struct wrote
+     * the family on top of the unit and shifted if_name 4 bytes early, so
+     * configd's KernelEventMonitor read KEV_DL_LINK_ON/OFF for a garbage
+     * interface name and never updated State:/Network/Interface/<if>/Link
+     * (DAR-378).
+     */
+    union {
         kern_event_msg  header;
-        uint32_t        unit;
-        char            if_name[IFNAMSIZ];
+        uint8_t         bytes[KEV_MSG_HEADER_SIZE + sizeof(struct net_event_data)];
     } event;
+    struct net_event_data * eventData =
+        (struct net_event_data *) &event.bytes[KEV_MSG_HEADER_SIZE];
 
     const IONetworkLinkEventData * linkData;
 
@@ -1098,15 +1113,15 @@ bool IONetworkInterface::inputEvent(UInt32 type, void * data)
                 (type == kIONetworkEventTypeLinkDown))
             {
 				bzero(&event, sizeof(event));
-                event.header.total_size    = sizeof(event);
+                event.header.total_size    = KEV_MSG_HEADER_SIZE + sizeof(*eventData);
                 event.header.vendor_code   = KEV_VENDOR_APPLE;
                 event.header.kev_class     = KEV_NETWORK_CLASS;
                 event.header.kev_subclass  = KEV_DL_SUBCLASS;
                 event.header.event_code    = (type == kIONetworkEventTypeLinkUp) ?
                                              KEV_DL_LINK_ON : KEV_DL_LINK_OFF;
-				event.header.event_data[0] = ifnet_family(_backingIfnet);
-                event.unit                 = ifnet_unit(_backingIfnet);
-                strncpy(&event.if_name[0], ifnet_name(_backingIfnet), IFNAMSIZ);
+                eventData->if_family       = ifnet_family(_backingIfnet);
+                eventData->if_unit         = ifnet_unit(_backingIfnet);
+                strlcpy(eventData->if_name, ifnet_name(_backingIfnet), IFNAMSIZ);
 
                 ifnet_event(_backingIfnet, &event.header);
 

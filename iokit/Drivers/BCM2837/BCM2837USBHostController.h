@@ -343,6 +343,10 @@ public:
 	 * parked async channels. Same thread rules as PublishEnumeratedDevice().
 	 */
 	void		RemoveAllDevices(void);
+	// Just the endpoint half of RemoveAllDevices(): retire every endpoint
+	// and take back parked async channels. Recovery under usb-apple-hub
+	// (DAR-353), where AppleUSBHub removes the devices itself.
+	void		PurgeAllEndpoints(void);
 
 	// ---------------- UIM: initialisation ----------------
 	virtual IOReturn	UIMInitialize(IOService *provider) override;

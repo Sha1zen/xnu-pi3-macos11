@@ -2460,7 +2460,12 @@ BCM2837DWC2::reinitController(void)
 	// on real hardware, which recovery does not unbind) may run a transfer
 	// against a bus in reset. reenumerateDevice() holds the lock around
 	// portReset() for the same reason.
-	bool portOK = portPowerOn() && portWaitForConnect(1000) && portReset();
+	// Under usb-apple-hub (DAR-353) the port is AppleUSBHub's: just power
+	// it, and let the connection change the core reset produces reach the
+	// hub through the root hub's status pipe, so the hub removes the old
+	// devices and resets and re-enumerates the port itself.
+	bool portOK = fAppleHub ? portPowerOn() :
+	    (portPowerOn() && portWaitForConnect(1000) && portReset());
 	if (portOK) {
 		fChannelWedged = false;
 	}
@@ -2492,8 +2497,14 @@ BCM2837DWC2::recoverController(void)
 	// are its children, not ours: the core reset below drops the root
 	// port, AppleUSBHub sees the connection change and removes and
 	// re-enumerates them itself, the way a Mac recovers a reset port.
-	if (fUSBController != NULL && !fAppleHub) {
-		fUSBController->RemoveAllDevices();
+	if (fUSBController != NULL) {
+		if (fAppleHub) {
+			// The core reset below forgets every parked async channel;
+			// the UIM's endpoints must forget them too.
+			fUSBController->PurgeAllEndpoints();
+		} else {
+			fUSBController->RemoveAllDevices();
+		}
 	}
 	if (fEthernetDriver != NULL) {
 		IOLog("BCM2837DWC2: recovery: SMSC9514Ethernet cannot be re-bound after "

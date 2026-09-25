@@ -1633,11 +1633,14 @@ BCM2837USBHostController::queueDataTransfer(short functionNumber, short endpoint
 		fRootHubIntBuf = memDesc;
 		fRootHubIntLen = bufferSize;
 		fRootHubIntPending = true;
-		// A change may already be waiting (e.g. the connection AppleUSBHub
-		// has not seen yet); otherwise poll for one.
-		checkRootHubChange();
-		if (fRootHubIntPending && fRootHubTimer != NULL) {
-			fRootHubTimer->setTimeoutMS(kRootHubPollMS);
+		// Never complete inside the call that queued it: a completion
+		// handler that re-arms would re-enter here. A real root hub
+		// completes this read later, from its timer (IOUSBControllerV3's
+		// RootHubTimerFired() -> RHCompleteTransaction(),
+		// IOUSBControllerV3.cpp:1396-1439, 1443-1486); so does this one.
+		// A change already waiting is reported on the next tick.
+		if (fRootHubTimer != NULL) {
+			fRootHubTimer->setTimeoutMS(1);
 		}
 		return kIOReturnSuccess;
 	}
@@ -2056,8 +2059,7 @@ BCM2837USBHostController::SetRootHubPortFeature(UInt16 wValue, UInt16 port)
 	 * one, until the hub clears it (ClearRootHubPortFeature()).
 	 */
 	if (wValue == kUSBHubPortResetFeature && ret == kIOReturnSuccess) {
-		fRootResetChange = true;
-		checkRootHubChange();
+		fRootResetChange = true;   // reported by the next rootHubTimerFired()
 	}
 	return ret;
 }
@@ -2145,7 +2147,7 @@ BCM2837USBHostController::rootHubTimerFired(OSObject *owner, IOTimerEventSource 
 void
 BCM2837USBHostController::UIMRootHubStatusChange(void)
 {
-	checkRootHubChange();
+	// Polled by rootHubTimerFired(); see checkRootHubChange().
 }
 
 void
@@ -2322,6 +2324,12 @@ BCM2837USBHostController::RemoveAllDevices(void)
 	    devices->getCount());
 	devices->release();
 
+	PurgeAllEndpoints();
+}
+
+void
+BCM2837USBHostController::PurgeAllEndpoints(void)
+{
 	if (_commandGate != NULL) {
 		_commandGate->runAction(purgeAllGated);
 	}

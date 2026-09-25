@@ -17,9 +17,12 @@
  * only path to the wire (docs/usb-support-plan.md's "hub-in-the-path" note,
  * which flagged this precisely so it would not be rediscovered mid-way).
  *
- * Scope is deliberately one hub deep. Cascaded hubs, hot-plug and
- * re-enumeration are not implemented: this board has exactly one hub,
- * soldered down, present at boot.
+ * Cascaded hubs are walked (hubEnumeratePorts() recurses, up to USB's five
+ * tiers), because devices plugged into the Pi's USB ports can themselves be
+ * hubs - an Apple wired keyboard is one. Per-device re-enumeration exists
+ * (reenumerateDevice(), DAR-373) and so does whole-controller recovery
+ * (DAR-352). Hot-plug does not (DAR-353): the bus is walked at boot and on
+ * recovery only.
  */
 
 #include "BCM2837DWC2.h"
@@ -104,28 +107,29 @@ BCM2837DWC2::publishable(const DWC2USBDevice *dev) const
 }
 
 IOReturn
-BCM2837DWC2::detachDevice(uint8_t address)
+BCM2837DWC2::detachDevice(uint8_t address, uint32_t recoveryGen)
 {
+	IOLockLock(fEnumLock);
+	IOReturn ret = kIOReturnSuccess;
 	DWC2USBDevice *dev = deviceByAddress(address);
-	if (dev == NULL) {
-		return kIOReturnNoDevice;
+	if (recoveryGen != fRecoveryGen) {
+		// A controller recovery ran since the caller started: the table was
+		// rebuilt and this address may now belong to a new device.
+		ret = kIOReturnAborted;
+	} else if (dev == NULL) {
+		ret = kIOReturnNoDevice;
+	} else {
+		dev->inUse = false;
 	}
-	dev->inUse = false;
-	return kIOReturnSuccess;
+	IOLockUnlock(fEnumLock);
+	return ret;
 }
 
 IOReturn
 BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
-    const DWC2USBDevice **devOut)
+    uint32_t recoveryGen, const DWC2USBDevice **devOut)
 {
 	*devOut = NULL;
-
-	DWC2USBDevice *dev = slotForAddress(address, true);
-	if (dev == NULL) {
-		return kIOReturnNoDevice;
-	}
-	uint8_t parentHubAddr = dev->parentHubAddr;
-	uint8_t parentPort = dev->parentPort;
 
 	/*
 	 * One device at address 0 at a time, like AppleUSBHub's dev-zero lock
@@ -134,6 +138,21 @@ BCM2837DWC2::reenumerateDevice(uint8_t address, bool extraResetDelay,
 	 * leave a device answering at address 0.
 	 */
 	IOLockLock(fEnumLock);
+
+	// Looked up under the lock, and only if no controller recovery ran
+	// since the caller began (see fRecoveryGen): recovery rebuilds the table
+	// under this same lock.
+	if (recoveryGen != fRecoveryGen) {
+		IOLockUnlock(fEnumLock);
+		return kIOReturnAborted;
+	}
+	DWC2USBDevice *dev = slotForAddress(address, true);
+	if (dev == NULL) {
+		IOLockUnlock(fEnumLock);
+		return kIOReturnNoDevice;
+	}
+	uint8_t parentHubAddr = dev->parentHubAddr;
+	uint8_t parentPort = dev->parentPort;
 	dev->inUse = false;
 
 	IOReturn ret = kIOReturnNotResponding;
@@ -371,6 +390,9 @@ BCM2837DWC2::enumerateDevice(uint8_t speed, uint8_t parentHubAddr, uint8_t paren
 	if (reuse == NULL && fNumDevices >= kDWC2MaxDevices) {
 		IOLog("BCM2837DWC2: device table full\n");
 		return false;
+	}
+	if (reuse == NULL && fReservedAddress != 0 && fNextAddress == fReservedAddress) {
+		fNextAddress++;     // the UIM's root-hub simulation owns it
 	}
 	if (reuse == NULL && fNextAddress > 127) {
 		IOLog("BCM2837DWC2: out of USB addresses\n");
@@ -820,6 +842,13 @@ BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub, uint32_t tier)
 
 		uint8_t speed = kUSBSpeedFull;
 		uint8_t splitHubAddr = 0, splitHubPort = 0;
+		// Checked before the reset: a reset device answers at address 0,
+		// and one that then cannot be given an address is left there.
+		if (fNumDevices >= kDWC2MaxDevices) {
+			IOLog("BCM2837DWC2: device table full (%u) - not resetting hub %u "
+			      "port %u\n", (uint32_t)kDWC2MaxDevices, hub->address, port);
+			continue;
+		}
 		if (!resetHubPort(hub, port, &speed, &splitHubAddr, &splitHubPort)) {
 			continue;
 		}
@@ -872,6 +901,11 @@ BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub, uint32_t tier)
 			    regRead(kDWC2_HPRT0), regRead(kDWC2_GINTSTS),
 			    regRead(kDWC2_HFIR),
 			    frameBefore, frameAfter);
+			// Leave nothing answering at address 0 on an enabled port, where
+			// it would collide with the next device reset; as
+			// AppleUSBHubPort::AddDevice() does on failure
+			// (AppleUSBHubPort.cpp:880-889).
+			hubClearPortFeature(hub, port, kHubFeatPortEnable);
 			continue;
 		}
 

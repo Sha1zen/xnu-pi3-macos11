@@ -22,6 +22,7 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IOWorkLoop.h>
 #include <IOKit/usb/IOUSBDevice.h>
 #include <IOKit/usb/IOUSBInterface.h>
 #include <IOKit/usb/IOUSBPipe.h>
@@ -78,6 +79,8 @@ public:
 	virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
 	virtual void free(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn message(UInt32 type, IOService *provider, void *argument = 0) APPLE_KEXT_OVERRIDE;
+	// SMSC9514Ethernet's workloop (it creates none; see the .cpp).
+	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
 
 private:
 	void teardown(void);
@@ -88,6 +91,7 @@ private:
 	IOUSBPipe               *fBulkOut;
 	SMSC9514FamilyTransport *fTransport;
 	SMSC9514Ethernet        *fEthernet;
+	IOWorkLoop              *fWorkLoop;
 };
 
 #endif /* _SMSC9514_USB_DRIVER_H */

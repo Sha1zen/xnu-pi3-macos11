@@ -264,6 +264,7 @@ SMSC9514USBDriver::init(OSDictionary *properties)
 	fBulkOut = NULL;
 	fTransport = NULL;
 	fEthernet = NULL;
+	fWorkLoop = NULL;
 	return true;
 }
 
@@ -330,6 +331,22 @@ SMSC9514USBDriver::start(IOService *provider)
 	IOLog("SMSC9514USBDriver: %04x:%04x at USB address %u, ID_REV %#010x\n",
 	    fDevice->GetVendorID(), fDevice->GetProductID(), fDevice->GetAddress(), idRev);
 
+	/*
+	 * SMSC9514Ethernet runs its RX timer and register accesses on
+	 * getWorkLoop(). IONetworkController::createWorkLoop() creates none
+	 * (IONetworkController.cpp:447-450), so without this the lookup falls
+	 * through the provider chain to the USB controller's workloop - where
+	 * the family refuses every synchronous request those accesses make
+	 * (kIOUSBSyncRequestOnWLThread, IOUSBController_Pipes.cpp:363-367).
+	 * Give it a workloop of its own.
+	 */
+	fWorkLoop = IOWorkLoop::workLoop();
+	if (fWorkLoop == NULL) {
+		IOLog("SMSC9514USBDriver: no workloop\n");
+		teardown();
+		return false;
+	}
+
 	fEthernet = new SMSC9514Ethernet;
 	if (fEthernet == NULL || !fEthernet->init(NULL, fTransport) ||
 	    !fEthernet->attach(this)) {
@@ -385,9 +402,16 @@ SMSC9514USBDriver::stop(IOService *provider)
 	super::stop(provider);
 }
 
+IOWorkLoop *
+SMSC9514USBDriver::getWorkLoop(void) const
+{
+	return (fWorkLoop != NULL) ? fWorkLoop : super::getWorkLoop();
+}
+
 void
 SMSC9514USBDriver::free(void)
 {
+	OSSafeReleaseNULL(fWorkLoop);
 	// The transport outlives SMSC9514Ethernet, which only borrows it.
 	delete fTransport;
 	fTransport = NULL;

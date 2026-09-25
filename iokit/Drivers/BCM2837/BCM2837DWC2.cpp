@@ -2278,7 +2278,9 @@ BCM2837DWC2::start(IOService *provider)
 void
 BCM2837DWC2::startUSBHostController(void)
 {
-	if (fNumDevices == 0) {
+	// With usb-apple-hub (DAR-353) nothing is enumerated here by design:
+	// the controller's root hub is what AppleUSBHub enumerates from.
+	if (fNumDevices == 0 && !fAppleHub) {
 		// Nothing enumerated - a controller with no devices to publish would
 		// still start cleanly, but there is nothing for it to do and saying
 		// so beats a silent no-op.

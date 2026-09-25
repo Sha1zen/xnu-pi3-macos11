@@ -1295,11 +1295,18 @@ BCM2837USBHostController::pollTimerFired(OSObject *owner, IOTimerEventSource *se
 			absolutetime_to_nanoseconds(now - me->fEngineStatsSince, &ns);
 			if (ns >= 10ULL * NSEC_PER_SEC) {
 				uint64_t ms = ns / NSEC_PER_MSEC;
+				// Open endpoints: flat across hot-plug cycles, or a device's
+				// endpoints outlive it (DAR-353).
+				uint32_t openEPs = 0;
+				for (DWC2UIMEndpoint *e = me->fEndpoints; e != NULL; e = e->next) {
+					openEPs++;
+				}
 				IOLog("BCM2837USBHostController: DAR-370 engine %u wakeups, %u attempts "
 				    "in %llu ms (%llu wakeups/s); async completions %u by interrupt, "
-				    "%u by poll\n", me->fEngineWakeups, me->fEngineAttempts, ms,
+				    "%u by poll; %u endpoints open\n", me->fEngineWakeups,
+				    me->fEngineAttempts, ms,
 				    (uint64_t)me->fEngineWakeups * 1000ULL / ms, me->fAsyncEvents,
-				    me->fAsyncPolled);
+				    me->fAsyncPolled, openEPs);
 				me->fEngineWakeups = 0;
 				me->fEngineAttempts = 0;
 				me->fAsyncEvents = 0;

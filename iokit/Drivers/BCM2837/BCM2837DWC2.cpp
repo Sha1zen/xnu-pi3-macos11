@@ -2526,8 +2526,16 @@ BCM2837DWC2::recoverController(void)
 	if (ok && fUSBController != NULL && !fAppleHub) {
 		published = publishEnumeratedDevices();
 	}
-	IOLog("BCM2837DWC2: recovery %u %s: %u device(s) enumerated, %u republished\n",
-	    fRecoveries, ok ? "done" : "FAILED", found, published);
+	if (ok && fUSBController != NULL && fAppleHub) {
+		fUSBController->RootPortReconnected();
+	}
+	if (fAppleHub) {
+		IOLog("BCM2837DWC2: recovery %u %s: root port connection change reported; "
+		      "AppleUSBHub re-enumerates\n", fRecoveries, ok ? "done" : "FAILED");
+	} else {
+		IOLog("BCM2837DWC2: recovery %u %s: %u device(s) enumerated, %u republished\n",
+		    fRecoveries, ok ? "done" : "FAILED", found, published);
+	}
 
 	fRecovering = false;
 

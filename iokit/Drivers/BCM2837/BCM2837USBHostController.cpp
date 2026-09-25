@@ -190,6 +190,8 @@ BCM2837USBHostController::init(OSDictionary *propTable)
 	fRootHubIntBuf = NULL;
 	fRootHubIntLen = 0;
 	fRootResetChange = false;
+	fRootConnectChange = false;
+	fNoDeviceLogs = 0;
 	fEndpoints = NULL;
 	fStaging = NULL;
 	fStagingSize = 0;
@@ -600,8 +602,15 @@ BCM2837USBHostController::createEndpoint(UInt8 functionNumber, UInt8 endpointNum
 		// recorded when it enumerated the device at boot.
 		const DWC2USBDevice *dev = fDWC2->findDevice(functionNumber);
 		if (dev == NULL) {
-			IOLog("BCM2837USBHostController: no enumerated device at address %u "
-			      "(endpoint %u)\n", functionNumber, endpointNumber);
+			// Expected briefly after a device goes away (its driver re-queues
+			// on the old address until it is terminated); bounded so it can
+			// never become a console flood.
+			if (fNoDeviceLogs < 10) {
+				fNoDeviceLogs++;
+				IOLog("BCM2837USBHostController: no enumerated device at address %u "
+				      "(endpoint %u)%s\n", functionNumber, endpointNumber,
+				    (fNoDeviceLogs == 10) ? " - further such messages suppressed" : "");
+			}
 			IOFree(ep, sizeof(*ep));
 			return NULL;
 		}
@@ -2036,6 +2045,9 @@ BCM2837USBHostController::GetRootHubPortStatus(IOUSBHubPortStatus *status, UInt1
 	if (fRootResetChange) {
 		changeFlags |= kHubPortBeingReset;   // C_PORT_RESET, see SetRootHubPortFeature()
 	}
+	if (fRootConnectChange) {
+		changeFlags |= kHubPortConnection;   // C_PORT_CONNECTION, see RootPortReconnected()
+	}
 
 	status->statusFlags = HostToUSBWord(statusFlags);
 	status->changeFlags = HostToUSBWord(changeFlags);
@@ -2072,6 +2084,9 @@ BCM2837USBHostController::ClearRootHubPortFeature(UInt16 wValue, UInt16 port)
 	}
 	if (wValue == kUSBHubPortResetChangeFeature) {
 		fRootResetChange = false;
+	}
+	if (wValue == kUSBHubPortConnectionChangeFeature) {
+		fRootConnectChange = false;
 	}
 	return fDWC2->rootPortFeature(wValue, false);
 }
@@ -2112,7 +2127,7 @@ BCM2837USBHostController::checkRootHubChange(void)
 		return;
 	}
 	uint32_t hprt0 = fDWC2->rootPortRegister();
-	bool changed = fRootResetChange ||
+	bool changed = fRootResetChange || fRootConnectChange ||
 	    (hprt0 & (kHPRT0_PRTCONNDET | kHPRT0_PRTENCHNG | kHPRT0_PRTOVRCURRCHNG));
 	if (!changed) {
 		return;
@@ -2129,6 +2144,29 @@ BCM2837USBHostController::checkRootHubChange(void)
 		fRootHubTimer->cancelTimeout();
 	}
 	Complete(fRootHubIntCompletion, kIOReturnSuccess, fRootHubIntLen - moved);
+}
+
+/*
+ * DAR-352 recovery under usb-apple-hub: the DWC2 core was soft-reset, so
+ * every device behind the root port lost its address - but a core reset
+ * does not set HPRT0.PRTCONNDET (QEMU's model rewrites HPRT0 without it,
+ * hcd-dwc2.c's reset handler, and the databook gives no such guarantee
+ * for real silicon). Report a connection change in software so AppleUSBHub
+ * does what it does for any connection change on an occupied port - "if we
+ * already have a device it must have been disconnected at sometime. We
+ * should kill it before servicing a connect event"
+ * (AppleUSBHubPort::DefaultConnectionChangeHandler(),
+ * AppleUSBHubPort.cpp:2973) - i.e. remove the old tree, then reset and
+ * re-enumerate the port.
+ */
+void
+BCM2837USBHostController::RootPortReconnected(void)
+{
+	fRootResetChange = false;
+	fRootConnectChange = true;   // reported by the next rootHubTimerFired()
+	if (fRootHubTimer != NULL && fRootHubIntPending) {
+		fRootHubTimer->setTimeoutMS(1);
+	}
 }
 
 void

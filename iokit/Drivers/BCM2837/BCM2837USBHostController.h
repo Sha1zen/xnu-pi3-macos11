@@ -347,6 +347,9 @@ public:
 	// and take back parked async channels. Recovery under usb-apple-hub
 	// (DAR-353), where AppleUSBHub removes the devices itself.
 	void		PurgeAllEndpoints(void);
+	// After that recovery's core reset: report a root-port connection
+	// change so AppleUSBHub re-enumerates. See the .cpp.
+	void		RootPortReconnected(void);
 
 	// ---------------- UIM: initialisation ----------------
 	virtual IOReturn	UIMInitialize(IOService *provider) override;
@@ -484,6 +487,8 @@ private:
 	IOMemoryDescriptor  *fRootHubIntBuf;      // not retained: the family's command owns it
 	UInt32               fRootHubIntLen;
 	bool                 fRootResetChange;    // software C_PORT_RESET (no HPRT0 bit)
+	bool                 fRootConnectChange;  // software C_PORT_CONNECTION after a core reset
+	UInt32               fNoDeviceLogs;
 	IOTimerEventSource  *fRootHubTimer;
 	static const UInt32  kRootHubPollMS = 32;
 	void			checkRootHubChange(void);

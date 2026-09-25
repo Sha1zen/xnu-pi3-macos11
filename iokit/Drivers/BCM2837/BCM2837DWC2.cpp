@@ -1916,6 +1916,12 @@ BCM2837DWC2::start(IOService *provider)
 		IOLog("BCM2837DWC2: IOLockAlloc (BSD register) failed\n");
 		return false;
 	}
+	fBSDPending = OSSet::withCapacity(2);
+	fBSDRetryCall = thread_call_allocate(bsdRetryFired, this);
+	if (fBSDPending == NULL || fBSDRetryCall == NULL) {
+		IOLog("BCM2837DWC2: BSD registration retry setup failed\n");
+		return false;
+	}
 
 	IODeviceMemory *devMem = provider->getDeviceMemoryWithIndex(0);
 	if (devMem == NULL) {
@@ -2570,6 +2576,10 @@ BCM2837DWC2::recoverController(void)
  * IORegisterNetworkInterface(). fBSDRegisterLock closes that window: the
  * check and the register call now happen as one atomic section.
  */
+// registerInterfaceWithBSD()'s retry: every 100 ms, for up to 5 s.
+#define kBSDRetryIntervalMS	100
+#define kBSDRetryMax		50
+
 void
 BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 {
@@ -2585,10 +2595,90 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 		return; // already named and attached
 	}
 	bool ok = IORegisterNetworkInterface(netif);
+	if (ok) {
+		fBSDPending->removeObject(netif);
+		IOLockUnlock(fBSDRegisterLock);
+		return;
+	}
+	/*
+	 * IONetworkStack names only an interface its own publish notifier has
+	 * already marked kInterfaceStatePublished; before that,
+	 * reserveInterfaceUnitNumber() refuses it ("unable to name interface in
+	 * state 0x0", IONetworkStack.cpp:684-690). Our notifier and the stack's
+	 * both fire on gIOPublishNotification, in no set order, one after the
+	 * other on the publishing thread, so waiting here would only wait on
+	 * ourselves. Seen on real hardware after a DAR-352 recovery re-bound
+	 * SMSC9514Ethernet: en0 never came back. Retry off this thread instead.
+	 * Retrying is safe: the refused call only removed the interface from
+	 * the stack's naming set (:677), and the stack's notifier re-adds it
+	 * (:444-459).
+	 */
+	fBSDPending->setObject(netif);
+	fBSDRetries = 0;
 	IOLockUnlock(fBSDRegisterLock);
-	if (!ok) {
-		IOLog("BCM2837DWC2: IORegisterNetworkInterface failed - interface will "
-		      "not appear in ifconfig\n");
+	if (!fStopping) {
+		uint64_t deadline;
+		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(fBSDRetryCall, deadline);
+	}
+}
+
+void
+BCM2837DWC2::bsdRetryFired(thread_call_param_t owner, thread_call_param_t)
+{
+	((BCM2837DWC2 *)owner)->retryPendingBSDRegistrations();
+}
+
+void
+BCM2837DWC2::retryPendingBSDRegistrations(void)
+{
+	if (fStopping) {
+		return;
+	}
+	IOLockLock(fBSDRegisterLock);
+	OSSet *todo = OSSet::withSet(fBSDPending);
+	IOLockUnlock(fBSDRegisterLock);
+	if (todo == NULL) {
+		return;
+	}
+	OSCollectionIterator *it = OSCollectionIterator::withCollection(todo);
+	if (it != NULL) {
+		IOService *netif;
+		while ((netif = OSDynamicCast(IOService, it->getNextObject())) != NULL) {
+			IOLockLock(fBSDRegisterLock);
+			bool ok = false;
+			if (netif->isInactive()) {
+				fBSDPending->removeObject(netif);   // terminated meanwhile
+				ok = true;
+			} else if (netif->getProperty(gIOBSDNameKey) != NULL ||
+			    IORegisterNetworkInterface(netif)) {
+				fBSDPending->removeObject(netif);
+				ok = true;
+			}
+			IOLockUnlock(fBSDRegisterLock);
+			if (ok && !netif->isInactive()) {
+				IOLog("BCM2837DWC2: network interface registered with BSD "
+				      "after %u retr%s\n", fBSDRetries + 1,
+				      fBSDRetries == 0 ? "y" : "ies");
+			}
+		}
+		it->release();
+	}
+	todo->release();
+
+	IOLockLock(fBSDRegisterLock);
+	bool again = fBSDPending->getCount() != 0;
+	if (again && ++fBSDRetries >= kBSDRetryMax) {
+		IOLog("BCM2837DWC2: IORegisterNetworkInterface still failing after "
+		      "%u retries - interface will not appear in ifconfig\n", fBSDRetries);
+		fBSDPending->flushCollection();
+		again = false;
+	}
+	IOLockUnlock(fBSDRegisterLock);
+	if (again && !fStopping) {
+		uint64_t deadline;
+		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(fBSDRetryCall, deadline);
 	}
 }
 
@@ -2616,6 +2706,9 @@ BCM2837DWC2::stop(IOService *provider)
 	}
 	if (fRecoveryCall != NULL) {
 		thread_call_cancel_wait(fRecoveryCall);
+	}
+	if (fBSDRetryCall != NULL) {
+		thread_call_cancel_wait(fBSDRetryCall);
 	}
 
 	// Undo start()'s manual attach()+start() of the Ethernet scaffolding
@@ -2705,6 +2798,15 @@ BCM2837DWC2::free(void)
 	if (fInterruptLock != NULL) {
 		IOLockFree(fInterruptLock);
 		fInterruptLock = NULL;
+	}
+	if (fBSDRetryCall != NULL) {
+		thread_call_cancel_wait(fBSDRetryCall);
+		thread_call_free(fBSDRetryCall);
+		fBSDRetryCall = NULL;
+	}
+	if (fBSDPending != NULL) {
+		fBSDPending->release();
+		fBSDPending = NULL;
 	}
 	if (fBSDRegisterLock != NULL) {
 		IOLockFree(fBSDRegisterLock);

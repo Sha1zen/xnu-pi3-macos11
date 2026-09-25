@@ -1287,7 +1287,21 @@ int hfs_setxattr_internal (struct cnode *cp, const void *data_ptr, size_t attrsi
 		/* Copy in the attribute data (if any). */
 		if (attrsize > 0) {
 			if (data_ptr) {
-				bcopy(data_ptr, &recp->attrData.attrData, attrsize);
+				/*
+				 * attrData.attrData is declared u_int8_t[2] but is
+				 * really variable length: recp was allocated at
+				 * btdata.itemSize just above. Built into the kernel
+				 * (XNU_KERNEL_PRIVATE), bcopy() is checked against the
+				 * declared sub-object (BOS_COPY_TYPE 1,
+				 * osfmk/libsa/string.h:158-163), so any inline xattr
+				 * longer than 2 bytes panicked with "__memmove_chk
+				 * object size check failed" (real Pi, `tar xpf` of an
+				 * archive carrying xattrs). Apple builds HFS as a kext,
+				 * where the check is against the whole allocation
+				 * (BOS_COPY_TYPE 0); __nochk_bcopy() (string.h:146) is
+				 * the kernel's own opt-out to that same check.
+				 */
+				__nochk_bcopy(data_ptr, &recp->attrData.attrData, attrsize);
 			} else {
 				/* 
 				 * A null UIO meant it originated in-kernel.  If they didn't supply data_ptr 

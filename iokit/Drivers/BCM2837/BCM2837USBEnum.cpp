@@ -735,13 +735,22 @@ BCM2837DWC2::resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speedOut,
 	/*
 	 * SPLIT transactions are needed only when this hub runs at high
 	 * speed but the device below it does not - then the hub has to
-	 * translate, and the host must address it explicitly. A
-	 * full-speed hub relays at its own speed and needs no splits.
+	 * translate, and the host must address it explicitly.
+	 *
+	 * A full-speed hub cannot translate. It relays at its own speed, so a
+	 * device below it shares that hub's own routing: if the full-speed hub
+	 * is itself reached through a high-speed hub's transaction translator,
+	 * so is everything under it, via the same TT hub and port (USB 2.0
+	 * 11.14, transaction translator). Matters now that enumeration walks
+	 * hubs behind hubs (hubEnumeratePorts()).
 	 */
 	uint8_t splitHubAddr = 0, splitHubPort = 0;
 	if (hub->speed == kUSBSpeedHigh && speed != kUSBSpeedHigh) {
 		splitHubAddr = hub->address;
 		splitHubPort = port;
+	} else if (hub->speed != kUSBSpeedHigh && hub->splitHubAddr != 0) {
+		splitHubAddr = hub->splitHubAddr;
+		splitHubPort = hub->splitHubPort;
 	}
 
 	IOLog("BCM2837DWC2: hub port %u: status %#x -> speed=%s split=%s\n",
@@ -760,7 +769,7 @@ BCM2837DWC2::resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speedOut,
  * attached. This is the step that reaches the LAN9514's Ethernet function.
  */
 bool
-BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub)
+BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub, uint32_t tier)
 {
 	USBHubDescriptor desc;
 	if (!hubGetDescriptor(hub, &desc)) {
@@ -865,6 +874,23 @@ BCM2837DWC2::hubEnumeratePorts(DWC2USBDevice *hub)
 			    frameBefore, frameAfter);
 			continue;
 		}
+
+		/*
+		 * A hub behind a hub: walk its ports too. Before this only the
+		 * root device's own ports were walked, so anything behind a second
+		 * hub was never enumerated - on a real Pi 3 that included the
+		 * keyboard function of an Apple wired keyboard (05ac:1005 is the
+		 * keyboard's built-in hub, on LAN9514 port 2). USB 2.0 (4.1.1)
+		 * allows at most five hub tiers below the root port.
+		 */
+		if (child->deviceClass == 9) {
+			if (tier < 5) {
+				hubEnumeratePorts(child, tier + 1);
+			} else {
+				IOLog("BCM2837DWC2: hub at address %u is past the 5-tier limit, "
+				      "not walking its ports\n", child->address);
+			}
+		}
 	}
 
 	return true;
@@ -893,7 +919,7 @@ BCM2837DWC2::enumerateBus(void)
 	// Hub class is 9 (USB 2.0 spec 11.23). On this board the root-port
 	// device is expected to BE a hub - that is what the LAN9514 presents.
 	if (root->deviceClass == 9) {
-		if (!hubEnumeratePorts(root)) {
+		if (!hubEnumeratePorts(root, 1)) {
 			IOLog("BCM2837DWC2: hub enumeration failed\n");
 		}
 	} else {

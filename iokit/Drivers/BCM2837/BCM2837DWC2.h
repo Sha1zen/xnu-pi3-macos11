@@ -473,7 +473,7 @@ struct DWC2USBDevice {
 	uint16_t intrInMax;
 };
 
-#define kDWC2MaxDevices 8
+#define kDWC2MaxDevices 16
 
 // GHWCFG2.NUM_HOST_CHAN is a 4-bit field (count - 1), so 16 is the most any
 // core can report. Real BCM2837 and the QEMU model both report 8.
@@ -987,7 +987,8 @@ private:
 	bool hubClearPortFeature(DWC2USBDevice *hub, uint8_t port, uint16_t feature);
 	bool hubGetPortStatus(DWC2USBDevice *hub, uint8_t port,
 	                      uint16_t *status, uint16_t *change);
-	bool hubEnumeratePorts(DWC2USBDevice *hub);
+	// `tier` is the hub's depth below the root port (the root-port hub is 1).
+	bool hubEnumeratePorts(DWC2USBDevice *hub, uint32_t tier);
 	bool resetHubPort(DWC2USBDevice *hub, uint8_t port, uint8_t *speed,
 	                  uint8_t *splitHubAddr, uint8_t *splitHubPort);
 	DWC2USBDevice *deviceByAddress(uint8_t address);

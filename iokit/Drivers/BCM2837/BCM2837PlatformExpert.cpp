@@ -72,7 +72,7 @@ BCM2837PlatformExpert::processTopLevel(IORegistryEntry *rootEntry)
  * The BCM2835-family PM block's watchdog is how this SoC resets itself:
  * there is no other reset controller. Register layout and sequence are
  * u-boot's (third_party/u-boot/arch/arm/mach-bcm283x/include/mach/wdog.h
- * and reset.c:21-37, the code that resets this exact board): block at
+ * and reset.c:32-49, __reset_cpu(), the code that resets this exact board): block at
  * peripheral base + 0x100000, RSTC at +0x1c, RSTS at +0x20, WDOG at +0x24,
  * every write tagged with the 0x5a000000 password. The peripheral base is
  * 0x3f000000 on BCM2837 (the "arm-io" ranges; BCM2837Mailbox.cpp's own
@@ -80,7 +80,7 @@ BCM2837PlatformExpert::processTopLevel(IORegistryEntry *rootEntry)
  *
  * Halt is the same reset after marking RSTS with the Raspberry Pi
  * firmware's "halt" partition (0x555): bootcode.bin then stays halted
- * instead of booting (u-boot reset.c:65-75, EFI_RESET_SHUTDOWN).
+ * instead of booting (u-boot reset.c:72-82, the EFI_RESET_SHUTDOWN branch).
  *
  * Mapped once at start() so the panic-restart path never allocates.
  */
@@ -93,7 +93,7 @@ enum {
 	kPMRSTCWrcfgMask    = 0x00000030,
 	kPMRSTCFullReset    = 0x00000020,
 	kPMRSTSHaltPartition = 0x00000555,
-	kPMResetTicks       = 10,       // u-boot's RESET_TIMEOUT
+	kPMResetTicks       = 10,       // u-boot reset.c:16 RESET_TIMEOUT
 };
 
 static volatile uint32_t *sPMRegs;

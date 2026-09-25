@@ -477,6 +477,13 @@ private:
 	// still be tracked so an abort can return it rather than leak it.
 	IOUSBCompletion      fRootHubIntCompletion;
 	bool                 fRootHubIntPending;
+	IOMemoryDescriptor  *fRootHubIntBuf;      // not retained: the family's command owns it
+	UInt32               fRootHubIntLen;
+	bool                 fRootResetChange;    // software C_PORT_RESET (no HPRT0 bit)
+	IOTimerEventSource  *fRootHubTimer;
+	static const UInt32  kRootHubPollMS = 32;
+	void			checkRootHubChange(void);
+	static void		rootHubTimerFired(OSObject *owner, IOTimerEventSource *sender);
 
 	DWC2UIMEndpoint    *findEndpoint(UInt8 functionNumber, UInt8 endpointNumber, UInt8 direction);
 	DWC2UIMEndpoint    *createEndpoint(UInt8 functionNumber, UInt8 endpointNumber,

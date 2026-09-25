@@ -186,6 +186,10 @@ BCM2837USBHostController::init(OSDictionary *propTable)
 
 	fDWC2 = NULL;
 	fPollTimer = NULL;
+	fRootHubTimer = NULL;
+	fRootHubIntBuf = NULL;
+	fRootHubIntLen = 0;
+	fRootResetChange = false;
 	fEndpoints = NULL;
 	fStaging = NULL;
 	fStagingSize = 0;
@@ -277,6 +281,14 @@ BCM2837USBHostController::free(void)
 		fPollTimer->release();
 		fPollTimer = NULL;
 	}
+	if (fRootHubTimer != NULL) {
+		fRootHubTimer->cancelTimeout();
+		if (_workLoop != NULL) {
+			_workLoop->removeEventSource(fRootHubTimer);
+		}
+		fRootHubTimer->release();
+		fRootHubTimer = NULL;
+	}
 
 	if (fAsyncEvent != NULL) {
 		if (fDWC2 != NULL) {
@@ -338,6 +350,13 @@ BCM2837USBHostController::UIMInitialize(IOService *provider)
 			_addressPending[dev->address] = true;
 			reserved++;
 		}
+	}
+
+	fRootHubTimer = IOTimerEventSource::timerEventSource(this, rootHubTimerFired);
+	if (fRootHubTimer == NULL ||
+	    _workLoop->addEventSource(fRootHubTimer) != kIOReturnSuccess) {
+		OSSafeReleaseNULL(fRootHubTimer);
+		return kIOReturnNoResources;
 	}
 
 	fPollTimer = IOTimerEventSource::timerEventSource(this, pollTimerFired);
@@ -422,6 +441,9 @@ BCM2837USBHostController::UIMFinalize(void)
 
 	if (fPollTimer != NULL) {
 		fPollTimer->cancelTimeout();
+	}
+	if (fRootHubTimer != NULL) {
+		fRootHubTimer->cancelTimeout();
 	}
 	fArmedDeadline = 0;
 
@@ -1580,12 +1602,10 @@ BCM2837USBHostController::queueDataTransfer(short functionNumber, short endpoint
 
 	if (functionNumber == fRootHubAddress) {
 		/*
-		 * The root hub's endpoint 1 status-change pipe. Nothing in this kernel
-		 * opens it (AppleUSBHub is not vendored), and BCM2837DWC2 enumerates
-		 * the bus once at boot rather than reacting to hot-plug, so there is
-		 * no status change to report and the read stays outstanding until it
-		 * is aborted. Tracking it is what makes that abort clean instead of a
-		 * leaked completion.
+		 * The root hub's endpoint 1 status-change pipe. AppleUSBHub (DAR-353,
+		 * usb-apple-hub) keeps one read outstanding here; it completes with
+		 * the port-change bitmap once HPRT0 reports a change (see
+		 * checkRootHubChange()). Without AppleUSBHub nothing opens it.
 		 */
 		if (endpointNumber != 1 || !isIn) {
 			// DAR-296: every other error path in this function (ep ==
@@ -1603,7 +1623,15 @@ BCM2837USBHostController::queueDataTransfer(short functionNumber, short endpoint
 			return kIOReturnNotPermitted;
 		}
 		fRootHubIntCompletion = completion;
+		fRootHubIntBuf = memDesc;
+		fRootHubIntLen = bufferSize;
 		fRootHubIntPending = true;
+		// A change may already be waiting (e.g. the connection AppleUSBHub
+		// has not seen yet); otherwise poll for one.
+		checkRootHubChange();
+		if (fRootHubIntPending && fRootHubTimer != NULL) {
+			fRootHubTimer->setTimeoutMS(kRootHubPollMS);
+		}
 		return kIOReturnSuccess;
 	}
 
@@ -1995,6 +2023,9 @@ BCM2837USBHostController::GetRootHubPortStatus(IOUSBHubPortStatus *status, UInt1
 	if (hprt0 & kHPRT0_PRTOVRCURRCHNG) {
 		changeFlags |= kHubPortOverCurrent;
 	}
+	if (fRootResetChange) {
+		changeFlags |= kHubPortBeingReset;   // C_PORT_RESET, see SetRootHubPortFeature()
+	}
 
 	status->statusFlags = HostToUSBWord(statusFlags);
 	status->changeFlags = HostToUSBWord(changeFlags);
@@ -2007,7 +2038,21 @@ BCM2837USBHostController::SetRootHubPortFeature(UInt16 wValue, UInt16 port)
 	if (port != 1) {
 		return kIOReturnBadArgument;
 	}
-	return fDWC2->rootPortFeature(wValue, true);
+	IOReturn ret = fDWC2->rootPortFeature(wValue, true);
+	/*
+	 * DWC2's HPRT0 has no reset-change bit: software drives PRTRST and
+	 * BCM2837DWC2::portReset() runs the whole reset synchronously. A USB 2.0
+	 * hub reports the end of a reset as C_PORT_RESET (11.24.2.7.2.5), and
+	 * AppleUSBHubPort waits for exactly that change before it addresses
+	 * the device (its kHubPortBeingReset change handler,
+	 * DefaultResetChangeHandler, AppleUSBHubPort.cpp:3555-3557). So report
+	 * one, until the hub clears it (ClearRootHubPortFeature()).
+	 */
+	if (wValue == kUSBHubPortResetFeature && ret == kIOReturnSuccess) {
+		fRootResetChange = true;
+		checkRootHubChange();
+	}
+	return ret;
 }
 
 IOReturn
@@ -2015,6 +2060,9 @@ BCM2837USBHostController::ClearRootHubPortFeature(UInt16 wValue, UInt16 port)
 {
 	if (port != 1) {
 		return kIOReturnBadArgument;
+	}
+	if (wValue == kUSBHubPortResetChangeFeature) {
+		fRootResetChange = false;
 	}
 	return fDWC2->rootPortFeature(wValue, false);
 }
@@ -2038,17 +2086,59 @@ BCM2837USBHostController::SetHubAddress(UInt16 wValue)
 }
 
 /*
- * A real controller calls these off its port-change interrupt to tell the hub
- * driver that a port changed. BCM2837DWC2 enumerates once at boot and does not
- * enable or handle port-change interrupts (HPRT0 PRTCONNDET/PRTENCHNG; its
- * DAR-136 interrupt handler covers host-channel completion only), and there is
- * no hub driver here to notify, so there is nothing to signal. This is a real
- * limitation, not a placeholder: USB hot-plug does not work in this kernel
- * (DAR-353).
+ * Root hub status change (DAR-353). DWC2 has one root port and its change
+ * bits live in HPRT0 (PRTCONNDET/PRTENCHNG/PRTOVRCURRCHNG), plus the
+ * software C_PORT_RESET above. BCM2837DWC2's interrupt handler covers host
+ * channels only, so the change is polled: every kRootHubPollMS while
+ * AppleUSBHub has its status-change read outstanding, the same 32 ms
+ * IOUSBControllerV3 polls its root hub at (kUSBRootHubPollingRate, USBHub.h:192;
+ * IOUSBControllerV3.cpp:1635). A change completes the read with the hub
+ * class's port bitmap: bit N for port N, bit 0 for the hub itself (USB 2.0
+ * 11.12.4), so 0x02 for our port 1.
  */
+void
+BCM2837USBHostController::checkRootHubChange(void)
+{
+	if (!fRootHubIntPending) {
+		return;
+	}
+	uint32_t hprt0 = fDWC2->rootPortRegister();
+	bool changed = fRootResetChange ||
+	    (hprt0 & (kHPRT0_PRTCONNDET | kHPRT0_PRTENCHNG | kHPRT0_PRTOVRCURRCHNG));
+	if (!changed) {
+		return;
+	}
+	UInt8 bitmap = 1U << 1;
+	UInt32 moved = 0;
+	if (fRootHubIntBuf != NULL && fRootHubIntLen >= 1) {
+		fRootHubIntBuf->writeBytes(0, &bitmap, 1);
+		moved = 1;
+	}
+	fRootHubIntPending = false;
+	fRootHubIntBuf = NULL;
+	if (fRootHubTimer != NULL) {
+		fRootHubTimer->cancelTimeout();
+	}
+	Complete(fRootHubIntCompletion, kIOReturnSuccess, fRootHubIntLen - moved);
+}
+
+void
+BCM2837USBHostController::rootHubTimerFired(OSObject *owner, IOTimerEventSource *sender)
+{
+	BCM2837USBHostController *me = OSDynamicCast(BCM2837USBHostController, owner);
+	if (me == NULL || me->isInactive()) {
+		return;
+	}
+	me->checkRootHubChange();
+	if (me->fRootHubIntPending) {
+		sender->setTimeoutMS(kRootHubPollMS);
+	}
+}
+
 void
 BCM2837USBHostController::UIMRootHubStatusChange(void)
 {
+	checkRootHubChange();
 }
 
 void

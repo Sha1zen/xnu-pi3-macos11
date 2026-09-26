@@ -2695,13 +2695,16 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 	if (!fStopping) {
 		uint64_t deadline;
 		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
-		thread_call_enter_delayed(fBSDRetryCall, deadline);
+		boolean_t was = thread_call_enter_delayed(fBSDRetryCall, deadline);
+		IOLog("BCM2837DWC2: TRACE scheduled retry call %p (was pending %d)\n",
+		    fBSDRetryCall, was);
 	}
 }
 
 void
 BCM2837DWC2::bsdRetryFired(thread_call_param_t owner, thread_call_param_t)
 {
+	IOLog("BCM2837DWC2: TRACE retry call fired\n");
 	((BCM2837DWC2 *)owner)->retryPendingBSDNames();
 }
 

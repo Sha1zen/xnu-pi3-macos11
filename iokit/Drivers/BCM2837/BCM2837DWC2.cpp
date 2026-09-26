@@ -2562,47 +2562,25 @@ BCM2837DWC2::recoverController(void)
 }
 
 /*
- * Complete an interface's BSD registration, once. Idempotent by design:
- * IONetworkStack::attachNetworkInterfaceToBSD() sets kIOBSDNameKey and then
- * RE-REGISTERS the interface (IONetworkStack.cpp:824-826), which can re-fire
- * the publish notification for an interface that is already fully attached.
- * Without this guard that second pass would try to name the same interface
- * twice.
- *
- * DAR-297: that guard alone is only safe against a second SEQUENTIAL call --
- * start()'s direct call and interfacePublished()'s notification callback
- * are documented (see the call site in start()) as asynchronous with
- * respect to each other, so two threads can both observe
- * getProperty(gIOBSDNameKey) == NULL before either has called
- * IORegisterNetworkInterface(). fBSDRegisterLock closes that window: the
- * check and the register call now happen as one atomic section.
- */
-/*
- * Fallback for registerInterfaceWithBSD(). Asks IONetworkStack to name and
- * BSD-attach one interface the way Apple's own namer does: configd's InterfaceNamer passes the interface's registry
- * entry ID, the unit, and kIONetworkStackRegisterInterfaceWithLowestUnit
- * (configd Plugins/InterfaceNamer/ifnamer.c:105-110 USE_REGISTRY_ENTRY_ID,
+ * Fallback for registerInterfaceWithBSD(): ask IONetworkStack to name and
+ * BSD-attach one interface the way Apple's own namer does. configd's
+ * InterfaceNamer passes the interface's registry entry ID, the unit, and
+ * kIONetworkStackRegisterInterfaceWithLowestUnit (configd
+ * Plugins/InterfaceNamer/ifnamer.c:105-110 USE_REGISTRY_ENTRY_ID,
  * :1427-1449, :2988-2993), and IONetworkStack::setProperties() finds it
  * with registryEntryIDMatching() (IONetworkStack.cpp:968-1000).
  *
  * The first attempt stays IORegisterNetworkInterface() (IOKitBSDInit.cpp:
  * 272-341), which looks the interface up by service-plane PATH
- * (IORegistryEntry::fromPath, IONetworkStack.cpp:1003-1010). Only that one
- * works from inside the publish notification: the entry-ID lookup goes
- * through getMatchingServices() and finds nothing yet (QEMU, 2026-09-25).
- * But after a DAR-352 controller recovery on real hardware, the re-bound
- * SMSC9514Ethernet's interface was refused 50 times and en0 never came
- * back. The suspicion is that the LAN9514 re-enumerates on the same port,
- * so the path also names the old, terminated interface. An entry ID names
- * exactly one object, and by the time a recovery happens there is no
- * boot-time race, so this is the fallback. logInterfacePathLookup() records
- * which it was.
- *
- * Confirmed on real hardware 2026-09-25: after a recovery the re-bound
- * interface's own path resolved to nothing (fromPath walks by name@location,
- * and the old, still-terminating VendorSpecificDevice@110000 has the same
- * one). The entry-ID lookup, tried inline, failed too, for the reason
- * above, so registerInterfaceWithBSD() now retries it from a thread call.
+ * (IORegistryEntry::fromPath, IONetworkStack.cpp:1003-1010), because only
+ * that one works from inside the publish notification: the entry-ID lookup
+ * goes through getMatchingServices() and finds nothing yet (QEMU,
+ * 2026-09-25). After a DAR-352 controller recovery on real hardware the
+ * path fails instead: the re-bound interface's own path resolved to
+ * nothing, because fromPath walks by name@location and the old,
+ * still-terminating VendorSpecificDevice@110000 has the same one. An entry
+ * ID names exactly one object, so registerInterfaceWithBSD() retries by ID
+ * from a thread call, after the notification has returned.
  */
 static bool
 nameInterfaceByEntryID(IOService *netif)
@@ -2661,6 +2639,22 @@ logInterfacePathLookup(IOService *netif)
 #define kBSDRetryIntervalMS	100
 #define kBSDRetryMax		50
 
+/*
+ * Complete an interface's BSD registration, once. Idempotent by design:
+ * IONetworkStack::attachNetworkInterfaceToBSD() sets kIOBSDNameKey and then
+ * RE-REGISTERS the interface (IONetworkStack.cpp:824-826), which can re-fire
+ * the publish notification for an interface that is already fully attached.
+ * Without this guard that second pass would try to name the same interface
+ * twice.
+ *
+ * DAR-297: that guard alone is only safe against a second SEQUENTIAL call --
+ * start()'s direct call and interfacePublished()'s notification callback
+ * are documented (see the call site in start()) as asynchronous with
+ * respect to each other, so two threads can both observe
+ * getProperty(gIOBSDNameKey) == NULL before either has called
+ * IORegisterNetworkInterface(). fBSDRegisterLock closes that window: the
+ * check and the register call now happen as one atomic section.
+ */
 void
 BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 {
@@ -2729,8 +2723,9 @@ BCM2837DWC2::retryPendingBSDNames(void)
 			 * registerInterfaceWithBSD(), which takes the lock. Holding it
 			 * across nameInterfaceByEntryID() hung the retry inside the
 			 * call (QEMU, 2026-09-25: en0 attached, the call never
-			 * returned), and with it every later interface publish. Only this thread call retries, and
-			 * IONetworkStack refuses to name an interface twice
+			 * returned), and with it every later interface publish.
+			 * Only this thread call retries, and IONetworkStack refuses
+			 * to name an interface twice
 			 * (reserveInterfaceUnitNumber()'s state check,
 			 * IONetworkStack.cpp:684-690), so nothing needs the lock here.
 			 */

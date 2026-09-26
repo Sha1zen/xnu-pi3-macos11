@@ -2722,10 +2722,13 @@ BCM2837DWC2::retryPendingBSDNames(void)
 		IOService *netif;
 		while ((netif = OSDynamicCast(IOService, it->getNextObject())) != NULL) {
 			IOLockLock(fBSDRegisterLock);
-			bool done = netif->isInactive() ||
-			    netif->getProperty(gIOBSDNameKey) != NULL;
-			bool named = !done && nameInterfaceByEntryID(netif);
-			if (done || named) {
+			// IONetworkStack may finish the BSD attach after
+			// setProperties() returns, so the name can appear on the
+			// next pass rather than this one.
+			bool gone = netif->isInactive();
+			bool named = !gone && (netif->getProperty(gIOBSDNameKey) != NULL ||
+			    nameInterfaceByEntryID(netif));
+			if (gone || named) {
 				fBSDPending->removeObject(netif);
 			}
 			IOLockUnlock(fBSDRegisterLock);

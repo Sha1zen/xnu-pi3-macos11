@@ -2726,8 +2726,10 @@ BCM2837DWC2::retryPendingBSDNames(void)
 			// setProperties() returns, so the name can appear on the
 			// next pass rather than this one.
 			bool gone = netif->isInactive();
-			bool named = !gone && (netif->getProperty(gIOBSDNameKey) != NULL ||
-			    nameInterfaceByEntryID(netif));
+			bool had = netif->getProperty(gIOBSDNameKey) != NULL;
+			bool named = !gone && (had || nameInterfaceByEntryID(netif));
+			IOLog("BCM2837DWC2: TRACE retry %u id 0x%llx gone %d had %d named %d\n",
+			    fBSDRetries, netif->getRegistryEntryID(), gone, had, named);
 			if (gone || named) {
 				fBSDPending->removeObject(netif);
 			}

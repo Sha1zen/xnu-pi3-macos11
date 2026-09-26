@@ -2695,16 +2695,13 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 	if (!fStopping) {
 		uint64_t deadline;
 		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
-		boolean_t was = thread_call_enter_delayed(fBSDRetryCall, deadline);
-		IOLog("BCM2837DWC2: TRACE scheduled retry call %p (was pending %d)\n",
-		    fBSDRetryCall, was);
+		thread_call_enter_delayed(fBSDRetryCall, deadline);
 	}
 }
 
 void
 BCM2837DWC2::bsdRetryFired(thread_call_param_t owner, thread_call_param_t)
 {
-	IOLog("BCM2837DWC2: TRACE retry call fired\n");
 	((BCM2837DWC2 *)owner)->retryPendingBSDNames();
 }
 
@@ -2724,15 +2721,23 @@ BCM2837DWC2::retryPendingBSDNames(void)
 	if (it != NULL) {
 		IOService *netif;
 		while ((netif = OSDynamicCast(IOService, it->getNextObject())) != NULL) {
-			IOLockLock(fBSDRegisterLock);
-			// IONetworkStack may finish the BSD attach after
-			// setProperties() returns, so the name can appear on the
-			// next pass rather than this one.
+			/*
+			 * Not under fBSDRegisterLock: naming re-registers the
+			 * interface (IONetworkStack::attachNetworkInterfaceToBSD(),
+			 * IONetworkStack.cpp:822-826), whose publish notification
+			 * comes back into interfacePublished() ->
+			 * registerInterfaceWithBSD(), which takes the lock. Holding it
+			 * across nameInterfaceByEntryID() hung the retry inside the
+			 * call (QEMU, 2026-09-25: en0 attached, the call never
+			 * returned), and with it every later interface publish. Only this thread call retries, and
+			 * IONetworkStack refuses to name an interface twice
+			 * (reserveInterfaceUnitNumber()'s state check,
+			 * IONetworkStack.cpp:684-690), so nothing needs the lock here.
+			 */
 			bool gone = netif->isInactive();
-			bool had = netif->getProperty(gIOBSDNameKey) != NULL;
-			bool named = !gone && (had || nameInterfaceByEntryID(netif));
-			IOLog("BCM2837DWC2: TRACE retry %u id 0x%llx gone %d had %d named %d\n",
-			    fBSDRetries, netif->getRegistryEntryID(), gone, had, named);
+			bool named = !gone && (netif->getProperty(gIOBSDNameKey) != NULL ||
+			    nameInterfaceByEntryID(netif));
+			IOLockLock(fBSDRegisterLock);
 			if (gone || named) {
 				fBSDPending->removeObject(netif);
 			}

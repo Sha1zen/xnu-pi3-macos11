@@ -12,6 +12,7 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IOKitKeys.h>
 #include <IOKit/network/IONetworkStack.h>
 #include <pexpert/pexpert.h>
 

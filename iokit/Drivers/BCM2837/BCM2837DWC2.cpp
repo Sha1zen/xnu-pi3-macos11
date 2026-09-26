@@ -2572,20 +2572,25 @@ BCM2837DWC2::recoverController(void)
  * check and the register call now happen as one atomic section.
  */
 /*
- * Ask IONetworkStack to name and BSD-attach one interface, the way Apple's
- * own namer does: configd's InterfaceNamer passes the interface's registry
+ * Fallback for registerInterfaceWithBSD(). Asks IONetworkStack to name and
+ * BSD-attach one interface the way Apple's own namer does: configd's InterfaceNamer passes the interface's registry
  * entry ID, the unit, and kIONetworkStackRegisterInterfaceWithLowestUnit
  * (configd Plugins/InterfaceNamer/ifnamer.c:105-110 USE_REGISTRY_ENTRY_ID,
  * :1427-1449, :2988-2993), and IONetworkStack::setProperties() finds it
  * with registryEntryIDMatching() (IONetworkStack.cpp:968-1000).
  *
- * Not IORegisterNetworkInterface() (IOKitBSDInit.cpp:272-341), the kernel's
- * netboot-only helper, which looks the interface up by service-plane PATH
- * (IORegistryEntry::fromPath, IONetworkStack.cpp:1003-1010). After a
- * DAR-352 controller recovery on real hardware, the re-bound
- * SMSC9514Ethernet's interface was never named, and en0 never came back.
- * The LAN9514 re-enumerates on the same port, so the new interface's path
- * can match the old, terminated one's. An entry ID names exactly one object.
+ * The first attempt stays IORegisterNetworkInterface() (IOKitBSDInit.cpp:
+ * 272-341), which looks the interface up by service-plane PATH
+ * (IORegistryEntry::fromPath, IONetworkStack.cpp:1003-1010). Only that one
+ * works from inside the publish notification: the entry-ID lookup goes
+ * through getMatchingServices() and finds nothing yet (QEMU, 2026-09-25).
+ * But after a DAR-352 controller recovery on real hardware, the re-bound
+ * SMSC9514Ethernet's interface was refused 50 times and en0 never came
+ * back. The suspicion is that the LAN9514 re-enumerates on the same port,
+ * so the path also names the old, terminated interface. An entry ID names
+ * exactly one object, and by the time a recovery happens there is no
+ * boot-time race, so this is the fallback. logInterfacePathLookup() records
+ * which it was.
  */
 static bool
 nameInterfaceByEntryID(IOService *netif)
@@ -2654,13 +2659,17 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 		IOLockUnlock(fBSDRegisterLock);
 		return; // already named and attached
 	}
-	bool ok = nameInterfaceByEntryID(netif);
-	IOLockUnlock(fBSDRegisterLock);
+	bool ok = IORegisterNetworkInterface(netif);
 	if (!ok) {
-		IOLog("BCM2837DWC2: IONetworkStack did not name the interface - it "
-		      "will not appear in ifconfig\n");
+		// See nameInterfaceByEntryID(). Record whether the path lookup
+		// found a different entry, then try by registry entry ID.
 		logInterfacePathLookup(netif);
+		ok = nameInterfaceByEntryID(netif);
+		IOLog("BCM2837DWC2: IORegisterNetworkInterface failed; by registry "
+		      "entry ID: %s\n", ok ? "named" : "also failed - interface will "
+		      "not appear in ifconfig");
 	}
+	IOLockUnlock(fBSDRegisterLock);
 }
 
 bool

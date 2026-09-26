@@ -2675,7 +2675,11 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 		IOLockUnlock(fBSDRegisterLock);
 		return; // already named and attached
 	}
-	bool ok = IORegisterNetworkInterface(netif);
+	// dwc2-test-name-by-id=1 skips the path attempt so QEMU, where it never
+	// fails, can exercise the entry-ID retry below.
+	uint32_t testByID = 0;
+	PE_parse_boot_argn("dwc2-test-name-by-id", &testByID, sizeof(testByID));
+	bool ok = (testByID == 0) && IORegisterNetworkInterface(netif);
 	if (ok) {
 		IOLockUnlock(fBSDRegisterLock);
 		return;

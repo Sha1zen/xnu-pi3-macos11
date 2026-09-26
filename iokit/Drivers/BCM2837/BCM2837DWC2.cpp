@@ -1916,12 +1916,6 @@ BCM2837DWC2::start(IOService *provider)
 		IOLog("BCM2837DWC2: IOLockAlloc (BSD register) failed\n");
 		return false;
 	}
-	fBSDPending = OSSet::withCapacity(2);
-	fBSDRetryCall = thread_call_allocate(bsdRetryFired, this);
-	if (fBSDPending == NULL || fBSDRetryCall == NULL) {
-		IOLog("BCM2837DWC2: BSD registration retry setup failed\n");
-		return false;
-	}
 
 	IODeviceMemory *devMem = provider->getDeviceMemoryWithIndex(0);
 	if (devMem == NULL) {
@@ -2576,9 +2570,74 @@ BCM2837DWC2::recoverController(void)
  * IORegisterNetworkInterface(). fBSDRegisterLock closes that window: the
  * check and the register call now happen as one atomic section.
  */
-// registerInterfaceWithBSD()'s retry: every 100 ms, for up to 5 s.
-#define kBSDRetryIntervalMS	100
-#define kBSDRetryMax		50
+/*
+ * Ask IONetworkStack to name and BSD-attach one interface, the way Apple's
+ * own namer does: configd's InterfaceNamer passes the interface's registry
+ * entry ID, the unit, and kIONetworkStackRegisterInterfaceWithLowestUnit
+ * (configd Plugins/InterfaceNamer/ifnamer.c:105-110 USE_REGISTRY_ENTRY_ID,
+ * :1427-1449, :2988-2993), and IONetworkStack::setProperties() finds it
+ * with registryEntryIDMatching() (IONetworkStack.cpp:968-1000).
+ *
+ * Not IORegisterNetworkInterface() (IOKitBSDInit.cpp:272-341), the kernel's
+ * netboot-only helper, which looks the interface up by service-plane PATH
+ * (IORegistryEntry::fromPath, IONetworkStack.cpp:1003-1010). After a
+ * DAR-352 controller recovery on real hardware, the re-bound
+ * SMSC9514Ethernet's interface was never named, and en0 never came back.
+ * The LAN9514 re-enumerates on the same port, so the new interface's path
+ * can match the old, terminated one's. An entry ID names exactly one object.
+ */
+static bool
+nameInterfaceByEntryID(IOService *netif)
+{
+	IOService *stack = IOService::waitForService(
+		IOService::serviceMatching("IONetworkStack"));
+	if (stack == NULL) {
+		return false;
+	}
+	uint64_t entryID = netif->getRegistryEntryID();
+	OSDictionary *dict = OSDictionary::withCapacity(3);
+	OSNumber *cmd = OSNumber::withNumber(
+		(unsigned long long)kIONetworkStackRegisterInterfaceWithLowestUnit, 32);
+	OSNumber *unit = OSNumber::withNumber((unsigned long long)0, 32);
+	OSData *id = OSData::withBytes(&entryID, sizeof(entryID));
+	if (dict != NULL && cmd != NULL && unit != NULL && id != NULL) {
+		dict->setObject(kIONetworkStackUserCommandKey, cmd);
+		dict->setObject(kIORegistryEntryIDKey, id);
+		dict->setObject(kIOInterfaceUnit, unit);
+		stack->setProperties(dict);
+	}
+	OSSafeReleaseNULL(dict);
+	OSSafeReleaseNULL(cmd);
+	OSSafeReleaseNULL(unit);
+	OSSafeReleaseNULL(id);
+	return netif->getProperty(gIOBSDNameKey) != NULL;
+}
+
+/*
+ * Diagnostic for a naming failure: does the interface's own service-plane
+ * path resolve back to it? (IORegisterNetworkInterface()'s lookup, above.)
+ */
+static void
+logInterfacePathLookup(IOService *netif)
+{
+	enum { kMaxPathLen = 512 };
+	char *buf = (char *)IOMalloc(kMaxPathLen);
+	if (buf == NULL) {
+		return;
+	}
+	int len = kMaxPathLen;
+	if (netif->getPath(buf, &len, gIOServicePlane)) {
+		IORegistryEntry *e = IORegistryEntry::fromPath(buf);
+		IOLog("BCM2837DWC2: interface id 0x%llx path %s -> %s%s\n",
+		    netif->getRegistryEntryID(), buf,
+		    (e == NULL) ? "nothing" : (e == netif ? "itself" : "a DIFFERENT entry"),
+		    (e != NULL && e != netif && e->inPlane(gIOServicePlane) &&
+		    OSDynamicCast(IOService, e) && ((IOService *)e)->isInactive())
+		    ? " (inactive)" : "");
+		OSSafeReleaseNULL(e);
+	}
+	IOFree(buf, kMaxPathLen);
+}
 
 void
 BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
@@ -2594,91 +2653,12 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 		IOLockUnlock(fBSDRegisterLock);
 		return; // already named and attached
 	}
-	bool ok = IORegisterNetworkInterface(netif);
-	if (ok) {
-		fBSDPending->removeObject(netif);
-		IOLockUnlock(fBSDRegisterLock);
-		return;
-	}
-	/*
-	 * IONetworkStack names only an interface its own publish notifier has
-	 * already marked kInterfaceStatePublished; before that,
-	 * reserveInterfaceUnitNumber() refuses it ("unable to name interface in
-	 * state 0x0", IONetworkStack.cpp:684-690). Our notifier and the stack's
-	 * both fire on gIOPublishNotification, in no set order, one after the
-	 * other on the publishing thread, so waiting here would only wait on
-	 * ourselves. Seen on real hardware after a DAR-352 recovery re-bound
-	 * SMSC9514Ethernet: en0 never came back. Retry off this thread instead.
-	 * Retrying is safe: the refused call only removed the interface from
-	 * the stack's naming set (:677), and the stack's notifier re-adds it
-	 * (:444-459).
-	 */
-	fBSDPending->setObject(netif);
-	fBSDRetries = 0;
+	bool ok = nameInterfaceByEntryID(netif);
 	IOLockUnlock(fBSDRegisterLock);
-	if (!fStopping) {
-		uint64_t deadline;
-		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
-		thread_call_enter_delayed(fBSDRetryCall, deadline);
-	}
-}
-
-void
-BCM2837DWC2::bsdRetryFired(thread_call_param_t owner, thread_call_param_t)
-{
-	((BCM2837DWC2 *)owner)->retryPendingBSDRegistrations();
-}
-
-void
-BCM2837DWC2::retryPendingBSDRegistrations(void)
-{
-	if (fStopping) {
-		return;
-	}
-	IOLockLock(fBSDRegisterLock);
-	OSSet *todo = OSSet::withSet(fBSDPending);
-	IOLockUnlock(fBSDRegisterLock);
-	if (todo == NULL) {
-		return;
-	}
-	OSCollectionIterator *it = OSCollectionIterator::withCollection(todo);
-	if (it != NULL) {
-		IOService *netif;
-		while ((netif = OSDynamicCast(IOService, it->getNextObject())) != NULL) {
-			IOLockLock(fBSDRegisterLock);
-			bool ok = false;
-			if (netif->isInactive()) {
-				fBSDPending->removeObject(netif);   // terminated meanwhile
-				ok = true;
-			} else if (netif->getProperty(gIOBSDNameKey) != NULL ||
-			    IORegisterNetworkInterface(netif)) {
-				fBSDPending->removeObject(netif);
-				ok = true;
-			}
-			IOLockUnlock(fBSDRegisterLock);
-			if (ok && !netif->isInactive()) {
-				IOLog("BCM2837DWC2: network interface registered with BSD "
-				      "after %u retr%s\n", fBSDRetries + 1,
-				      fBSDRetries == 0 ? "y" : "ies");
-			}
-		}
-		it->release();
-	}
-	todo->release();
-
-	IOLockLock(fBSDRegisterLock);
-	bool again = fBSDPending->getCount() != 0;
-	if (again && ++fBSDRetries >= kBSDRetryMax) {
-		IOLog("BCM2837DWC2: IORegisterNetworkInterface still failing after "
-		      "%u retries - interface will not appear in ifconfig\n", fBSDRetries);
-		fBSDPending->flushCollection();
-		again = false;
-	}
-	IOLockUnlock(fBSDRegisterLock);
-	if (again && !fStopping) {
-		uint64_t deadline;
-		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
-		thread_call_enter_delayed(fBSDRetryCall, deadline);
+	if (!ok) {
+		IOLog("BCM2837DWC2: IONetworkStack did not name the interface - it "
+		      "will not appear in ifconfig\n");
+		logInterfacePathLookup(netif);
 	}
 }
 
@@ -2706,9 +2686,6 @@ BCM2837DWC2::stop(IOService *provider)
 	}
 	if (fRecoveryCall != NULL) {
 		thread_call_cancel_wait(fRecoveryCall);
-	}
-	if (fBSDRetryCall != NULL) {
-		thread_call_cancel_wait(fBSDRetryCall);
 	}
 
 	// Undo start()'s manual attach()+start() of the Ethernet scaffolding
@@ -2798,15 +2775,6 @@ BCM2837DWC2::free(void)
 	if (fInterruptLock != NULL) {
 		IOLockFree(fInterruptLock);
 		fInterruptLock = NULL;
-	}
-	if (fBSDRetryCall != NULL) {
-		thread_call_cancel_wait(fBSDRetryCall);
-		thread_call_free(fBSDRetryCall);
-		fBSDRetryCall = NULL;
-	}
-	if (fBSDPending != NULL) {
-		fBSDPending->release();
-		fBSDPending = NULL;
 	}
 	if (fBSDRegisterLock != NULL) {
 		IOLockFree(fBSDRegisterLock);

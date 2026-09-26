@@ -104,6 +104,29 @@ do_count(const char *dev, const char *hname, int search)
 	do_header(dev, hname, count);
 }
 
+/*
+ * Backported from upstream xnu-12377.1.9's SETUP/config/mkheaders.c
+ * (third_party/xnu-latest, lines 107-116, 183, 203) -- DAR-407.
+ * xnu-7195's write loop below did free(fl) and then read fl->f_next in the
+ * for-increment (use-after-free). With the host's current malloc that
+ * segfaults between fopen("w") and fclose(), so the rewritten option
+ * header is left EMPTY and every later header is never rewritten; doconf
+ * (csh) ignores config's exit status, so the build carries on with stale
+ * option headers. Hit when enabling sysv_sem/msg/shm: sysv_sem.h became 1,
+ * sysv_msg.h empty, sysv_shm.h stayed 0, and the kernel failed to link
+ * (_sysctl__kern_sysv_children undefined).
+ */
+static void
+free_file_list(struct file_list *fl)
+{
+	struct file_list *fl_prev;
+	while (fl != 0) {
+		fl_prev = fl;
+		fl = fl->f_next;
+		free((char *)fl_prev);
+	}
+}
+
 static void
 do_header(const char *dev, const char *hname, int count)
 {
@@ -111,7 +134,7 @@ do_header(const char *dev, const char *hname, int count)
 	const char *inw;
 	char *inwcopy;
 	struct file_list *fl = NULL;    /* may exit for(;;) uninitted */
-	struct file_list *fl_head, *fl_prev;
+	struct file_list *fl_head;
 	FILE *inf, *outf;
 	int inc, oldcount;
 
@@ -169,11 +192,7 @@ do_header(const char *dev, const char *hname, int count)
 	}
 	(void) fclose(inf);
 	if (count == oldcount) {
-		while (fl != 0) {
-			fl_prev = fl;
-			fl = fl->f_next;
-			free((char *)fl_prev);
-		}
+		free_file_list(fl_head);
 		return;
 	}
 	if (oldcount == -1) {
@@ -192,8 +211,8 @@ do_header(const char *dev, const char *hname, int count)
 	for (fl = fl_head; fl != 0; fl = fl->f_next) {
 		fprintf(outf, "#define %s %d\n",
 		    fl->f_fn, count ? fl->f_type : 0);
-		free((char *)fl);
 	}
+	free_file_list(fl_head);
 	(void) fclose(outf);
 }
 

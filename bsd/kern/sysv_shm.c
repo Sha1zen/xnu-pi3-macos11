@@ -280,8 +280,26 @@ shm_deallocate_segment(struct shmid_kernel *shmseg)
 		FREE(shm_handle, M_SHM);
 	}
 	shmseg->u.shm_internal = USER_ADDR_NULL;                /* tunnel */
-	size = vm_map_round_page(shmseg->u.shm_segsz,
-	    vm_map_page_mask(current_map()));
+	/*
+	 * DAR-407: uncommit in the same units shmget_allocate_segment()
+	 * commits in -- the segment size rounded to the KERNEL page size
+	 * (mach_vm_round_page_overflow() at its shmall check), not the
+	 * current user map's page size. Upstream (this line, and
+	 * third_party/xnu-latest/bsd/kern/sysv_shm.c:280-282) rounds with
+	 * vm_map_page_mask(current_map()), which only agrees with the
+	 * allocation side when kernel and user page sizes are equal. On
+	 * BCM2837 (1GB RAM) the kernel runs 4K pages -- osfmk/arm/
+	 * arm_init.c:332-345 picks PAGE_SHIFT_CONST = ARM_PGSHIFT = 12 for
+	 * <=1GB devices (osfmk/arm64/proc_reg.h:870-874, no __ARM_16K_PG__),
+	 * the same path Apple's own H6/H7 devices took -- under 16K user
+	 * maps (getpagesize() == 16384 in QEMU), so a 0x1000
+	 * segment committed btoc(0x1000)=1 and uncommitted btoc(0x4000)=4,
+	 * leaving shm_committed at -3; the next shmall check then computed
+	 * (int)-3 + (unsigned)btoc() (bsd/arm/param.h:110 casts to
+	 * unsigned), which wraps to ~4G > shmall (whenever btoc() < 3) and
+	 * returns ENOMEM.
+	 */
+	size = mach_vm_round_page(shmseg->u.shm_segsz);
 	shm_committed -= btoc(size);
 	shm_nused--;
 	shmseg->u.shm_perm.mode = SHMSEG_FREE;
@@ -870,7 +888,15 @@ shmget_allocate_segment(struct proc *p, struct shmget_args *uap, int mode,
 	mac_sysvshm_label_associate(cred, shmseg);
 #endif
 	shmseg->u.shm_ctime = sysv_shmtime();
-	shm_committed += btoc(size);
+	/*
+	 * DAR-407: commit the whole kernel-page-rounded segment, the same
+	 * quantity the shmall check above tested and shm_deallocate_segment()
+	 * uncommits. Upstream adds btoc(size), where `size` is only the LAST
+	 * ANON_MAX_SIZE chunk of the loop above (third_party/xnu-latest/bsd/
+	 * kern/sysv_shm.c:854) -- equal to total_size for any segment of one
+	 * chunk, an undercount for larger ones.
+	 */
+	shm_committed += btoc(total_size);
 	shm_nused++;
 	AUDIT_ARG(svipc_perm, &shmseg->u.shm_perm);
 	if (shmseg->u.shm_perm.mode & SHMSEG_WANTED) {

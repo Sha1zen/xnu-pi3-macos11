@@ -21,7 +21,15 @@
 #  KERNEL_RELEASE = [ KERNEL_BASE ]
 #  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug os_reason_debug pgtrace ]
 #  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_ltable_stats config_ltable_debug config_waitq_stats config_workloop_debug config_waitq_debug pgtrace ]
-#  BSD_BASE =       [ mach_bsd config_workqueue psynch config_proc_uuid_policy config_personas ]
+#  BSD_BASE =       [ mach_bsd sysv_sem sysv_msg sysv_shm config_workqueue psynch config_proc_uuid_policy config_personas ]
+#  sysv_sem/sysv_msg/sysv_shm added 2026-09-26 (DAR-407) for macOS parity:
+#  config/MASTER.arm64.MacOSX:23 and config/MASTER.x86_64:23 both list all
+#  three in BSD_BASE (the iPhoneOS line, config/MASTER.arm64.iPhoneOS:23,
+#  which this file was forked from, has none). Without sysv_shm, syscalls
+#  262-265 (bsd/kern/syscalls.master:401-411) compile to nosys, and nosys()
+#  (bsd/kern/subr_xxx.c:183-188) raises SIGSYS - fatal to cairo's MIT-SHM probe
+#  (shmget(IPC_PRIVATE)). The .c files are unconditionally built
+#  (bsd/conf/files:536-539); the options only flip the #if SYSV_* guards.
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]
 #  BSD_DEBUG =      [ BSD_BASE config_netboot config_imageboot config_coredump pgo config_vnguard ]

@@ -45,7 +45,7 @@ public:
 	// rather than faking a nonexistent NVRAM store - see BCM2837PlatformExpert.cpp.
 	virtual void processTopLevel(IORegistryEntry *root) APPLE_KEXT_OVERRIDE;
 
-	// DAR-330: reset/halt the board through the PM watchdog. PEHaltRestart()
+	// DAR-334: reset/halt the board through the PM watchdog. PEHaltRestart()
 	// ends in gIOPlatform->haltRestart() (IOPlatformExpert.cpp:1087-1091);
 	// until this, PE_halt_restart stayed NULL and every reboot, halt and
 	// panic-restart just stopped at "MACH Reboot" until a power cycle.

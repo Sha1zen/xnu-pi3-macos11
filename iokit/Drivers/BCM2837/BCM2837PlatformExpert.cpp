@@ -8,7 +8,8 @@ OSDefineMetaClassAndStructors(BCM2837PlatformExpert, IODTPlatformExpert);
 #define super IODTPlatformExpert
 
 /*
- * No start() override. DAR-331 step 1 used to publish "AAPL,boot-display"
+ * start() only maps the PM watchdog for haltRestart() (DAR-334, below).
+ * It publishes nothing: DAR-331 step 1 used to publish "AAPL,boot-display"
  * on this platform expert, but nothing ever registerService()s a platform
  * expert (IOPlatformExpert::start() does not, iokit/Kernel/
  * IOPlatformExpert.cpp:129-195), so no driver could ever match against
@@ -66,7 +67,7 @@ BCM2837PlatformExpert::processTopLevel(IORegistryEntry *rootEntry)
 	createNubs(this, IODTFindMatchingEntries(rootEntry, kIODTExclusive, excludeList()));
 }
 
-#pragma mark - Reset and halt (DAR-330)
+#pragma mark - Reset and halt (DAR-334)
 
 /*
  * The BCM2835-family PM block's watchdog is how this SoC resets itself:
@@ -83,6 +84,18 @@ BCM2837PlatformExpert::processTopLevel(IORegistryEntry *rootEntry)
  * instead of booting (u-boot reset.c:72-82, the EFI_RESET_SHUTDOWN branch).
  *
  * Mapped once at start() so the panic-restart path never allocates.
+ *
+ * Panics reset too (kPEPanicRestartCPU*), as a Mac restarts after a panic.
+ * Before this, PE_halt_restart was NULL and a panic spun in halt_all_cpus()
+ * with the message on screen. The trade-off, chosen deliberately (DAR-334
+ * acceptance: "A kernel panic reboots the Pi"): a panic that recurs on
+ * every boot now loops through the firmware instead of staying on screen.
+ * The panic text still goes out on serial first (debug.c's panic path
+ * prints it, then debug.c:1263-1264 calls kdp_machine_reboot_type() only
+ * when panicDebugging is off; debug=0x4 (DB_NMI) keeps a panic spinning
+ * instead, debug.c:344-346). The watchdog fires ~150 us after the write, so
+ * the last UART FIFO of output can be cut. tools/boot_test.py fails on
+ * any panic by default, so the reboot cannot hide one from a test.
  */
 enum {
 	kPMPhysBase         = 0x3f100000,

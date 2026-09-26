@@ -1917,6 +1917,12 @@ BCM2837DWC2::start(IOService *provider)
 		IOLog("BCM2837DWC2: IOLockAlloc (BSD register) failed\n");
 		return false;
 	}
+	fBSDPending = OSSet::withCapacity(2);
+	fBSDRetryCall = thread_call_allocate(bsdRetryFired, this);
+	if (fBSDPending == NULL || fBSDRetryCall == NULL) {
+		IOLog("BCM2837DWC2: BSD naming retry setup failed\n");
+		return false;
+	}
 
 	IODeviceMemory *devMem = provider->getDeviceMemoryWithIndex(0);
 	if (devMem == NULL) {
@@ -2591,6 +2597,12 @@ BCM2837DWC2::recoverController(void)
  * exactly one object, and by the time a recovery happens there is no
  * boot-time race, so this is the fallback. logInterfacePathLookup() records
  * which it was.
+ *
+ * Confirmed on real hardware 2026-09-25: after a recovery the re-bound
+ * interface's own path resolved to nothing (fromPath walks by name@location,
+ * and the old, still-terminating VendorSpecificDevice@110000 has the same
+ * one). The entry-ID lookup, tried inline, failed too, for the reason
+ * above, so registerInterfaceWithBSD() now retries it from a thread call.
  */
 static bool
 nameInterfaceByEntryID(IOService *netif)
@@ -2645,6 +2657,10 @@ logInterfacePathLookup(IOService *netif)
 	IOFree(buf, kMaxPathLen);
 }
 
+// registerInterfaceWithBSD()'s entry-ID retry: every 100 ms, up to 5 s.
+#define kBSDRetryIntervalMS	100
+#define kBSDRetryMax		50
+
 void
 BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 {
@@ -2660,16 +2676,79 @@ BCM2837DWC2::registerInterfaceWithBSD(IOService *netif)
 		return; // already named and attached
 	}
 	bool ok = IORegisterNetworkInterface(netif);
-	if (!ok) {
-		// See nameInterfaceByEntryID(). Record whether the path lookup
-		// found a different entry, then try by registry entry ID.
-		logInterfacePathLookup(netif);
-		ok = nameInterfaceByEntryID(netif);
-		IOLog("BCM2837DWC2: IORegisterNetworkInterface failed; by registry "
-		      "entry ID: %s\n", ok ? "named" : "also failed - interface will "
-		      "not appear in ifconfig");
+	if (ok) {
+		IOLockUnlock(fBSDRegisterLock);
+		return;
+	}
+	// See nameInterfaceByEntryID(). The entry-ID lookup cannot see the
+	// interface until its publish notification (this call) has finished,
+	// so retry it from fBSDRetryCall, as configd's namer runs after the
+	// interface is registered rather than inside its notification.
+	logInterfacePathLookup(netif);
+	fBSDPending->setObject(netif);
+	fBSDRetries = 0;
+	IOLockUnlock(fBSDRegisterLock);
+	if (!fStopping) {
+		uint64_t deadline;
+		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(fBSDRetryCall, deadline);
+	}
+}
+
+void
+BCM2837DWC2::bsdRetryFired(thread_call_param_t owner, thread_call_param_t)
+{
+	((BCM2837DWC2 *)owner)->retryPendingBSDNames();
+}
+
+void
+BCM2837DWC2::retryPendingBSDNames(void)
+{
+	if (fStopping) {
+		return;
+	}
+	IOLockLock(fBSDRegisterLock);
+	OSSet *todo = OSSet::withSet(fBSDPending);
+	IOLockUnlock(fBSDRegisterLock);
+	if (todo == NULL) {
+		return;
+	}
+	OSCollectionIterator *it = OSCollectionIterator::withCollection(todo);
+	if (it != NULL) {
+		IOService *netif;
+		while ((netif = OSDynamicCast(IOService, it->getNextObject())) != NULL) {
+			IOLockLock(fBSDRegisterLock);
+			bool done = netif->isInactive() ||
+			    netif->getProperty(gIOBSDNameKey) != NULL;
+			bool named = !done && nameInterfaceByEntryID(netif);
+			if (done || named) {
+				fBSDPending->removeObject(netif);
+			}
+			IOLockUnlock(fBSDRegisterLock);
+			if (named) {
+				IOLog("BCM2837DWC2: interface id 0x%llx named by registry "
+				      "entry ID (retry %u)\n", netif->getRegistryEntryID(),
+				      fBSDRetries + 1);
+			}
+		}
+		it->release();
+	}
+	todo->release();
+
+	IOLockLock(fBSDRegisterLock);
+	bool again = fBSDPending->getCount() != 0;
+	if (again && ++fBSDRetries >= kBSDRetryMax) {
+		IOLog("BCM2837DWC2: interface still unnamed after %u retries - it "
+		      "will not appear in ifconfig\n", fBSDRetries);
+		fBSDPending->flushCollection();
+		again = false;
 	}
 	IOLockUnlock(fBSDRegisterLock);
+	if (again && !fStopping) {
+		uint64_t deadline;
+		clock_interval_to_deadline(kBSDRetryIntervalMS, kMillisecondScale, &deadline);
+		thread_call_enter_delayed(fBSDRetryCall, deadline);
+	}
 }
 
 bool
@@ -2696,6 +2775,9 @@ BCM2837DWC2::stop(IOService *provider)
 	}
 	if (fRecoveryCall != NULL) {
 		thread_call_cancel_wait(fRecoveryCall);
+	}
+	if (fBSDRetryCall != NULL) {
+		thread_call_cancel_wait(fBSDRetryCall);
 	}
 
 	// Undo start()'s manual attach()+start() of the Ethernet scaffolding
@@ -2785,6 +2867,15 @@ BCM2837DWC2::free(void)
 	if (fInterruptLock != NULL) {
 		IOLockFree(fInterruptLock);
 		fInterruptLock = NULL;
+	}
+	if (fBSDRetryCall != NULL) {
+		thread_call_cancel_wait(fBSDRetryCall);
+		thread_call_free(fBSDRetryCall);
+		fBSDRetryCall = NULL;
+	}
+	if (fBSDPending != NULL) {
+		fBSDPending->release();
+		fBSDPending = NULL;
 	}
 	if (fBSDRegisterLock != NULL) {
 		IOLockFree(fBSDRegisterLock);

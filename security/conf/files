@@ -10,6 +10,7 @@ OPTIONS/config_fse			optional config_fse
 
 security/mac_audit.c					optional config_macf
 security/mac_base.c					standard
+security/mac_amfi_standin.c				optional config_macf
 security/mac_data.c					optional config_macf
 security/mac_label.c					optional config_macf
 security/mac_process.c					optional config_macf

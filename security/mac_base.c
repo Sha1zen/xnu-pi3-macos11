@@ -374,9 +374,22 @@ void (*load_security_extensions_function)(void) = 0;
 /*
  * Init after early Mach startup, but before BSD
  */
+#if CONFIG_MACF
+/* iokit port (DAR-391): the permissive AMFI stand-in, security/mac_amfi_standin.c. */
+extern void mac_amfi_standin_register(void);
+#endif
+
 void
 mac_policy_initmach(void)
 {
+#if CONFIG_MACF
+	/*
+	 * Registered here, before the security extensions and before
+	 * lockdown makes mac_policy_list read-only (see its declaration);
+	 * a policy registered from IOKit matching faults writing the list.
+	 */
+	mac_amfi_standin_register();
+#endif
 	/*
 	 * For the purposes of modules that want to know if they were
 	 * loaded "early", set the mac_late flag once we've processed

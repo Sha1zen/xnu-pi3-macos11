@@ -152,8 +152,24 @@ uint32_t cons_ops_index = VC_CONS_OPS;
  * from-scratch shell process was confirmed alive, printing its banner+
  * prompt via real write(1,...) calls and genuinely blocked on read(0,...)
  * for input - just invisible, because cons_ops_index pointed at video.
+ *
+ * Writable, as on x86 (above), not SECURITY_READ_ONLY_LATE (DAR-358).
+ * IOGraphics hands the console to a graphics client through it:
+ * IOFramebuffer::open() calls setPlatformConsole(kPEDisableScreen)
+ * (iokit/Graphics/IOGraphicsFamily/IOFramebuffer.cpp:9128-9132), which
+ * reaches PE_initialize_console() -> switch_to_serial_console()
+ * (pexpert/arm/pe_init.c:182-185, osfmk/console/serial_general.c:114-118),
+ * a store to this variable. (Close sends kPEAcquireScreen,
+ * IOFramebuffer.cpp:10379; on this port the stored value is always
+ * SERIAL_CONS_OPS, set at arm_init.c:540.) Upstream xnu-7195 declares it
+ * writable only for __x86_64__, the platform IOGraphics ships on, and
+ * SECURITY_READ_ONLY_LATE otherwise (tag xnu-7195.81.3,
+ * osfmk/console/serial_console.c:139-143). This ARM port runs IOGraphics
+ * (DAR-331), and a read-only cons_ops_index panics the first
+ * IOServiceOpen of the framebuffer ("Unexpected fault in kernel static
+ * region" at pe_init.c:184).
  */
-SECURITY_READ_ONLY_LATE(uint32_t) cons_ops_index = SERIAL_CONS_OPS;
+uint32_t cons_ops_index = SERIAL_CONS_OPS;
 #endif
 
 LCK_GRP_DECLARE(console_lck_grp, "console");

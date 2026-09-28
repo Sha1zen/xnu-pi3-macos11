@@ -81,7 +81,7 @@
  * own, still ENOTSUP stubs in bsd_pthread_stub.c): bsdthread_register2
  * (the newer TSD-offset-aware SPI - unreachable now that `.version` is
  * correctly 0, see above), psynch_* (userspace mutex/cv/rwlock kernel
- * slow path), thread_selfid, bsdthread_ctl (QoS override machinery - a
+ * slow path), bsdthread_ctl (QoS override machinery - a
  * separate real subsystem pthread_workqueue.c also implements policy
  * for but wasn't in this task's scope). bsdthread_create/
  * bsdthread_terminate were NOT ported in this file's original pass
@@ -977,4 +977,24 @@ real_bsdthread_terminate(struct proc *p, user_addr_t stackaddr, size_t size,
 
 	pthread_kern->thread_exception_return();
 	__builtin_unreachable();
+}
+
+#pragma mark - thread_selfid (verbatim from kern_support.c)
+
+/*
+ * real_thread_selfid() -- third_party/libpthread/kern/kern_support.c:987-993
+ * (`_thread_selfid`), wired to the `.thread_selfid` slot as
+ * kern/kern_init.c:25 does. DAR-416: Apple's real _pthread_start()
+ * (libpthread src/pthread.c, _pthread_set_self_internal) stores
+ * __thread_selfid() into the new thread's pthread_t and traps
+ * ("failed to set thread_id") on -1, so every real pthread_create()ed
+ * thread died with SIGTRAP while this was bsd_pthread_stub.c's ENOTSUP
+ * stub.
+ */
+int
+real_thread_selfid(__unused struct proc *p, uint64_t *retval)
+{
+	thread_t thread = current_thread();
+	*retval = thread_tid(thread);
+	return KERN_SUCCESS;
 }

@@ -26,14 +26,13 @@
  * Minimal, honest stand-in: register a function table of safe no-ops/error
  * returns, just enough that bsd_init()'s own pthread_init() call and normal
  * BSD proc lifecycle (pth_proc_hashinit/pth_proc_hashdelete, called
- * unconditionally from fork/exit) don't crash. psynch_* and
- * thread_selfid still return an error rather than doing anything real
- * (psynch_* is
+ * unconditionally from fork/exit) don't crash. psynch_* still
+ * returns an error rather than doing anything real (psynch_* is
  * real, substantial design+implementation work of its own, deliberately
  * out of scope here - see docs/roadmap.md Phase 7.5). bsdthread_register,
  * the five workq_* thread-stack hooks, and (as of 2026-08-25)
  * bsdthread_create/bsdthread_terminate are all real as of this pass
- * (bsd_pthread_workq.c).
+ * (bsd_pthread_workq.c), and thread_selfid is real as of DAR-416.
  *
  * bsdthread_create()/bsdthread_terminate() are now real, full
  * implementations of the real pthread ABI (verbatim ports of
@@ -121,6 +120,7 @@ extern int real_bsdthread_create(struct proc *p, user_addr_t user_func,
     uint32_t flags, user_addr_t *retval);
 extern int real_bsdthread_terminate(struct proc *p, user_addr_t stackaddr,
     size_t size, uint32_t kthport, uint32_t sem, int32_t *retval);
+extern int real_thread_selfid(struct proc *p, uint64_t *retval);
 
 static int
 stub_bsdthread_register2(struct proc *p, user_addr_t threadstart, user_addr_t wqthread,
@@ -129,16 +129,6 @@ stub_bsdthread_register2(struct proc *p, user_addr_t threadstart, user_addr_t wq
 {
 	(void)p; (void)threadstart; (void)wqthread; (void)flags; (void)stack_addr_hint;
 	(void)targetconc_ptr; (void)dispatchqueue_offset; (void)tsd_offset;
-	if (retval) {
-		*retval = 0;
-	}
-	return ENOTSUP;
-}
-
-static int
-stub_thread_selfid(struct proc *p, uint64_t *retval)
-{
-	(void)p;
 	if (retval) {
 		*retval = 0;
 	}
@@ -186,7 +176,7 @@ static const struct pthread_functions_s bsd_pthread_stub_functions = {
 	.bsdthread_create = real_bsdthread_create,
 	.bsdthread_register = real_bsdthread_register,
 	.bsdthread_terminate = real_bsdthread_terminate,
-	.thread_selfid = stub_thread_selfid,
+	.thread_selfid = real_thread_selfid,
 	.psynch_mutexwait = (typeof(((pthread_functions_t)0)->psynch_mutexwait))stub_psynch_error,
 	.psynch_mutexdrop = (typeof(((pthread_functions_t)0)->psynch_mutexdrop))stub_psynch_error,
 	.psynch_cvbroad = (typeof(((pthread_functions_t)0)->psynch_cvbroad))stub_psynch_error,

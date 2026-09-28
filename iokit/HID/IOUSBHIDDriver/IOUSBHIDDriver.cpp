@@ -2394,7 +2394,7 @@ IOUSBHIDDriver::GetIndexedString(UInt8 index, UInt8 *vOutBuf, UInt32 *vOutSize, 
         return kIOReturnMessageTooLarge;
     }
 
-    strlcpy((char *)vOutBuf, strBuf, (size_t)strLen);	/* was (size_t)strlen, the function; see tools/patch_iohid_gaps.sh fix 6b */
+    strlcpy((char *)vOutBuf, strBuf, (size_t)strLen);	/* was (size_t)strlen, the function (anurodhp/IOUSBFamily iokit-port, DAR-421) */
     *vOutSize = strLen;
     return kIOReturnSuccess;
 }
@@ -2769,7 +2769,7 @@ IOUSBHIDDriver::ChangeOutstandingIO(OSObject *target, void *param1, void *param2
 			me->_outstandingIO++;
 			break;
 			
-		case (UInt32)-1:	/* was -1; see tools/patch_iohid_gaps.sh fix 6 */
+		case (UInt32)-1:	/* was -1 (anurodhp/IOUSBFamily iokit-port, DAR-421) */
 			if (!--me->_outstandingIO && me->_needToClose)
 			{
 				USBLog(3, "IOUSBHIDDriver(%s)[%p]::ChangeOutstandingIO isInactive = %d, outstandingIO = %d - closing device", me->getName(), me, me->isInactive(), (uint32_t)me->_outstandingIO);

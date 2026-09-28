@@ -5429,7 +5429,7 @@ AppleUSBHub::ChangeOutstandingIO(OSObject *target, void *param1, void *param2, v
 			USBLog(6, "AppleUSBHub[%p]::ChangeOutstandingIO(+) now (%d) fromPowerChange(%s)", me, (int)me->_outstandingIO, me->_outstandingIOFromPowerChange ? "true" : "false");
 			break;
 			
-		case (UInt32)-1:	/* was -1; see tools/vendor_usb_into_xnu.sh FIX 4 */
+		case (UInt32)-1:	/* was -1 (anurodhp/IOUSBFamily iokit-port, DAR-421) */
 			--me->_outstandingIO;
             if (fromPowerChange)
                 me->_outstandingIOFromPowerChange = false;
@@ -5525,7 +5525,7 @@ AppleUSBHub::ChangeRaisedPowerState(OSObject *target, void *param1, void *param2
 			USBLog(3, "AppleUSBHub[%p]::ChangeRaisedPowerState(+) now (%d)", me, (int)me->_raisedPowerStateCount);
 			break;
 			
-		case (UInt32)-1:	/* was -1; see tools/vendor_usb_into_xnu.sh FIX 4 */
+		case (UInt32)-1:	/* was -1 (anurodhp/IOUSBFamily iokit-port, DAR-421) */
 			--me->_raisedPowerStateCount;
 			USBLog(3, "AppleUSBHub[%p]::ChangeRaisedPowerState(-) now (%d)", me, (int)me->_raisedPowerStateCount);
 			break;
@@ -5616,7 +5616,7 @@ AppleUSBHub::ChangeOutstandingResumes(OSObject *target, void *param1, void *para
 			USBLog(3, "AppleUSBHub[%p]::ChangeOutstandingResumes(+) now (%d)", me, (int)me->_outstandingResumes);
 			break;
 			
-		case (UInt32)-1:	/* was -1; see tools/vendor_usb_into_xnu.sh FIX 4 */
+		case (UInt32)-1:	/* was -1 (anurodhp/IOUSBFamily iokit-port, DAR-421) */
 			--me->_outstandingResumes;
 			USBLog(3, "AppleUSBHub[%p]::ChangeOutstandingResumes(-) now (%d)", me, (int)me->_outstandingResumes);
 			break;

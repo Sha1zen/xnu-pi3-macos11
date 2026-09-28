@@ -156,7 +156,7 @@ class IOUSBControllerV3 : public IOUSBControllerV2
 		virtual IOReturn		IsocIO(IOMemoryDescriptor *buffer, UInt64 frameStart, UInt32 numFrames, IOUSBLowLatencyIsocFrame *frameList, USBDeviceAddress address, Endpoint *endpoint, IOUSBLowLatencyIsocCompletion *completion, UInt32 updateFrequency );	
 
 		// we override this one to add some stuff which requires the _device iVar
-/* declaration removed by tools/vendor_usb_into_xnu.sh -- no definition exists in IOUSBFamily-560.4.2; inherit IOUSBController::GetErrataBits */
+/* declaration removed (anurodhp/IOUSBFamily iokit-port, DAR-421) -- no definition exists in IOUSBFamily-560.4.2; inherit IOUSBController::GetErrataBits */
 // 		virtual UInt32			GetErrataBits(UInt16 vendorID, UInt16 deviceID, UInt16 revisionID );    
 	
 		// IOUSBControllerV2 methods

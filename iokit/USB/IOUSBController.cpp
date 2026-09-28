@@ -134,7 +134,7 @@ USBGlobals::USBGlobals ( void )
 	}
 	
 	// Register our sysctl interface
-	/* removed by tools/vendor_usb_into_xnu.sh: built into the kernel, so
+	/* removed (anurodhp/IOUSBFamily iokit-port, DAR-421): built into the kernel, so
 	 * SYSCTL_PROC already registered this via __sysctl_set; registering
 	 * it again panics (kern_newsysctl.c:242). */
 	
@@ -143,7 +143,7 @@ USBGlobals::USBGlobals ( void )
 USBGlobals::~USBGlobals ( void )
 {
 	// Unregister our sysctl interface
-	/* removed by tools/vendor_usb_into_xnu.sh -- see the constructor. */
+	/* removed (anurodhp/IOUSBFamily iokit-port, DAR-421) -- see the constructor. */
 	
 }
 

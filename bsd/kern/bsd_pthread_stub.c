@@ -23,16 +23,12 @@
  * extension not loaded (function table is NULL)"), a real, unavoidable
  * architectural gap, not a bug in anything we wrote.
  *
- * Minimal, honest stand-in: register a function table of safe no-ops/error
- * returns, just enough that bsd_init()'s own pthread_init() call and normal
- * BSD proc lifecycle (pth_proc_hashinit/pth_proc_hashdelete, called
- * unconditionally from fork/exit) don't crash. psynch_* still
- * returns an error rather than doing anything real (psynch_* is
- * real, substantial design+implementation work of its own, deliberately
- * out of scope here - see docs/roadmap.md Phase 7.5). bsdthread_register,
- * the five workq_* thread-stack hooks, and (as of 2026-08-25)
- * bsdthread_create/bsdthread_terminate are all real as of this pass
- * (bsd_pthread_workq.c), and thread_selfid is real as of DAR-416.
+ * This file registers the function table (it started as safe no-ops/error
+ * returns). Every entry is now real: bsdthread_register/create/terminate,
+ * thread_selfid, the workq_* thread-stack hooks and pthread_init come from
+ * kern_support.c (bsd_pthread_workq.c); the psynch_* syscalls, the
+ * per-process psynch hash and the stackshot owner lookups are kern_synch.c
+ * (bsd_pthread_synch.c, DAR-416). Only bsdthread_register2 stays ENOTSUP.
  *
  * bsdthread_create()/bsdthread_terminate() are now real, full
  * implementations of the real pthread ABI (verbatim ports of
@@ -82,22 +78,36 @@ extern int workq_handle_stack_events(proc_t p, thread_t th, vm_map_t map,
     user_addr_t stackaddr, mach_port_name_t kport, user_addr_t events,
     int nevents, int upcall_flags);
 
-static void
-stub_pthread_init(void)
-{
-}
-
-static void
-stub_pth_proc_hashinit(proc_t p)
-{
-	(void)p;
-}
-
-static void
-stub_pth_proc_hashdelete(proc_t p)
-{
-	(void)p;
-}
+/*
+ * DAR-416: pthread init, the per-process psynch hash, the psynch_* syscalls
+ * and the stackshot owner lookups are real now. bsd_pthread_synch.c is
+ * third_party/libpthread/kern/kern_synch.c, and real_pthread_init() is
+ * kern_support.c's _pthread_init (bsd_pthread_workq.c). They were no-op /
+ * ENOTSUP stubs here. That was invisible under this port's hand-written
+ * userland pthread, but Apple's libpthread takes psynch for every
+ * RECURSIVE/ERRORCHECK mutex and every rwlock (pthread_mutex.c:1765-1779
+ * restricts ulock to NORMAL firstfit), so a contended one spun at 100% CPU
+ * (configd's CFFDManager lock). Each slot is declared with its own
+ * pthread_functions_s type, so the table matches kern_init.c:19-39.
+ */
+#define PTHREAD_REAL_FN(slot, fn) \
+	extern __typeof__(*((pthread_functions_t)0)->slot) fn
+extern void real_pthread_init(void);
+PTHREAD_REAL_FN(pth_proc_hashinit, _pth_proc_hashinit);
+PTHREAD_REAL_FN(pth_proc_hashdelete, _pth_proc_hashdelete);
+PTHREAD_REAL_FN(psynch_mutexwait, _psynch_mutexwait);
+PTHREAD_REAL_FN(psynch_mutexdrop, _psynch_mutexdrop);
+PTHREAD_REAL_FN(psynch_cvbroad, _psynch_cvbroad);
+PTHREAD_REAL_FN(psynch_cvsignal, _psynch_cvsignal);
+PTHREAD_REAL_FN(psynch_cvwait, _psynch_cvwait);
+PTHREAD_REAL_FN(psynch_cvclrprepost, _psynch_cvclrprepost);
+PTHREAD_REAL_FN(psynch_rw_longrdlock, _psynch_rw_longrdlock);
+PTHREAD_REAL_FN(psynch_rw_rdlock, _psynch_rw_rdlock);
+PTHREAD_REAL_FN(psynch_rw_unlock, _psynch_rw_unlock);
+PTHREAD_REAL_FN(psynch_rw_wrlock, _psynch_rw_wrlock);
+PTHREAD_REAL_FN(psynch_rw_yieldwrlock, _psynch_rw_yieldwrlock);
+PTHREAD_REAL_FN(pthread_find_owner, _pthread_find_owner);
+PTHREAD_REAL_FN(pthread_get_thread_kwq, _pthread_get_thread_kwq);
 
 /*
  * real_bsdthread_create()/real_bsdthread_terminate(): now real, verbatim
@@ -135,25 +145,6 @@ stub_bsdthread_register2(struct proc *p, user_addr_t threadstart, user_addr_t wq
 	return ENOTSUP;
 }
 
-static int
-stub_psynch_error(void)
-{
-	return ENOTSUP;
-}
-
-static void
-stub_pthread_find_owner(thread_t thread, struct stackshot_thread_waitinfo *waitinfo)
-{
-	(void)thread;
-	(void)waitinfo;
-}
-
-static void *
-stub_pthread_get_thread_kwq(thread_t thread)
-{
-	(void)thread;
-	return NULL;
-}
 
 static const struct pthread_functions_s bsd_pthread_stub_functions = {
 	/*
@@ -170,27 +161,27 @@ static const struct pthread_functions_s bsd_pthread_stub_functions = {
 	 * libpthread vintage).
 	 */
 	.version = 0,
-	.pthread_init = stub_pthread_init,
-	.pth_proc_hashinit = stub_pth_proc_hashinit,
-	.pth_proc_hashdelete = stub_pth_proc_hashdelete,
+	.pthread_init = real_pthread_init,
+	.pth_proc_hashinit = _pth_proc_hashinit,
+	.pth_proc_hashdelete = _pth_proc_hashdelete,
 	.bsdthread_create = real_bsdthread_create,
 	.bsdthread_register = real_bsdthread_register,
 	.bsdthread_terminate = real_bsdthread_terminate,
 	.thread_selfid = real_thread_selfid,
-	.psynch_mutexwait = (typeof(((pthread_functions_t)0)->psynch_mutexwait))stub_psynch_error,
-	.psynch_mutexdrop = (typeof(((pthread_functions_t)0)->psynch_mutexdrop))stub_psynch_error,
-	.psynch_cvbroad = (typeof(((pthread_functions_t)0)->psynch_cvbroad))stub_psynch_error,
-	.psynch_cvsignal = (typeof(((pthread_functions_t)0)->psynch_cvsignal))stub_psynch_error,
-	.psynch_cvwait = (typeof(((pthread_functions_t)0)->psynch_cvwait))stub_psynch_error,
-	.psynch_cvclrprepost = (typeof(((pthread_functions_t)0)->psynch_cvclrprepost))stub_psynch_error,
-	.psynch_rw_longrdlock = (typeof(((pthread_functions_t)0)->psynch_rw_longrdlock))stub_psynch_error,
-	.psynch_rw_rdlock = (typeof(((pthread_functions_t)0)->psynch_rw_rdlock))stub_psynch_error,
-	.psynch_rw_unlock = (typeof(((pthread_functions_t)0)->psynch_rw_unlock))stub_psynch_error,
-	.psynch_rw_wrlock = (typeof(((pthread_functions_t)0)->psynch_rw_wrlock))stub_psynch_error,
-	.psynch_rw_yieldwrlock = (typeof(((pthread_functions_t)0)->psynch_rw_yieldwrlock))stub_psynch_error,
+	.psynch_mutexwait = _psynch_mutexwait,
+	.psynch_mutexdrop = _psynch_mutexdrop,
+	.psynch_cvbroad = _psynch_cvbroad,
+	.psynch_cvsignal = _psynch_cvsignal,
+	.psynch_cvwait = _psynch_cvwait,
+	.psynch_cvclrprepost = _psynch_cvclrprepost,
+	.psynch_rw_longrdlock = _psynch_rw_longrdlock,
+	.psynch_rw_rdlock = _psynch_rw_rdlock,
+	.psynch_rw_unlock = _psynch_rw_unlock,
+	.psynch_rw_wrlock = _psynch_rw_wrlock,
+	.psynch_rw_yieldwrlock = _psynch_rw_yieldwrlock,
 	.bsdthread_register2 = stub_bsdthread_register2,
-	.pthread_find_owner = stub_pthread_find_owner,
-	.pthread_get_thread_kwq = stub_pthread_get_thread_kwq,
+	.pthread_find_owner = _pthread_find_owner,
+	.pthread_get_thread_kwq = _pthread_get_thread_kwq,
 	.workq_handle_stack_events = workq_handle_stack_events,
 	.workq_create_threadstack = workq_create_threadstack,
 	.workq_destroy_threadstack = workq_destroy_threadstack,

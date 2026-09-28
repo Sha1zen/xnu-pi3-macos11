@@ -77,6 +77,44 @@ COMP_SUBDIRS =
 
 tcp_cubic.o_CFLAGS_ADD += -Wno-error=implicit-int-float-conversion
 
+# DAR-416: bsd_pthread_synch.c is pthread.kext's kern/kern_synch.c. Apple
+# builds it as a kext: third_party/libpthread/xcodescripts/kext.xcconfig:44
+# defines XNU_KERNEL_PRIVATE MACH_KERNEL_PRIVATE ABSOLUTETIME_SCALAR_TYPE
+# NEEDS_SCHED_CALL_T __PTHREAD_EXPOSE_INTERNALS__ (:45 adds MACH_ASSERT
+# DEBUG for development), but not BSD_KERNEL_PRIVATE. Only
+# __PTHREAD_EXPOSE_INTERNALS__ is added here; the *_PRIVATE ones select
+# blocks the installed headers no longer contain (see below), and nothing
+# here tests the other two. With BSD_KERNEL_PRIVATE, sys/user.h:87-90 pulls in
+# sys/pthread_internal.h's opaque 48-byte struct ksyn_waitq_element (the
+# storage inside struct uthread), which clashes with the kext's real
+# definition of the same struct (pthread_kext/kern_internal.h).
+# XNU_KERNEL_PRIVATE goes too, even though kext.xcconfig:44 defines it:
+# the kext compiles against the installed kernel headers, where every
+# XNU_KERNEL_PRIVATE block has already been unifdef'ed out
+# (makedefs/MakeInc.def:937, XNU_PRIVATE_UNIFDEF), so it never sees them.
+# In-tree, sys/user.h:91-103 would pull sys/eventvar.h's workq internals in.
+# Neither kern_synch.c nor its headers test either macro themselves.
+bsd_pthread_synch.o_CFLAGS_RM += -DBSD_KERNEL_PRIVATE -DXNU_KERNEL_PRIVATE
+# Nor does a kext get bsd's forced -include meta_features.h (line 41 above),
+# the kernel config's CONFIG_* switches; kern_synch.c tests none, but
+# exported headers test some of them.
+# "-include" appears only once in these CFLAGS, so removing both words is
+# exact.
+bsd_pthread_synch.o_CFLAGS_RM += -include meta_features.h
+# CONFIG_PGTRACE also arrives in the global CONFIG_DEFINES
+# (config/MASTER.arm64.bcm2837:126), which a kext never gets either.
+bsd_pthread_synch.o_CFLAGS_ADD += -UCONFIG_PGTRACE
+# -Wno-error=int-conversion: kern_synch.c passes its kwq pointers to
+# pthread_kern callbacks declared with uintptr_t (bsd_pthread_synch.c:1972,
+# psynch_wait_wakeup). Pointer-to-uintptr_t is lossless on LP64. The clang Apple built the kext with treated
+# that as a warning; this toolchain makes it an error by default.
+bsd_pthread_synch.o_CFLAGS_ADD += -D__PTHREAD_EXPOSE_INTERNALS__ -Wno-error=int-conversion
+# Without XNU_KERNEL_PRIVATE, osfmk/kern/debug.h:41-43 includes
+# <TargetConditionals.h>, which a kext gets from the SDK. SDKROOT_RESOLVED is
+# the kernel SDK tools/build_xnu_7195.sh exports. -idirafter, so it only
+# fills that gap and never shadows a kernel header.
+bsd_pthread_synch.o_CFLAGS_ADD += -idirafter $(SDKROOT_RESOLVED)/usr/include
+
 #
 # Diagnostic opt-outs.  We need to make this list empty.
 #

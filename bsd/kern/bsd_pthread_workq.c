@@ -120,6 +120,7 @@
 #include <mach/policy.h>
 #include <vm/vm_map.h>
 #include <vm/vm_fault.h>
+#include <pexpert/pexpert.h>     /* PE_parse_boot_argn, real_pthread_init() */
 
 /*
  * mach_vm_map_external/mach_vm_allocate_external/mach_vm_deallocate/
@@ -537,6 +538,9 @@ workq_handle_stack_events(proc_t p, thread_t th, vm_map_t map,
  * comment for why that's the real, correct pairing for this project's
  * exact xnu-7195 + libpthread-454.80.2 combination.
  */
+/* kern_support.c:162; set from the boot-arg in real_pthread_init(). */
+static uint32_t pthread_mutex_default_policy;
+
 int
 real_bsdthread_register(struct proc *p,
 		    user_addr_t threadstart,
@@ -653,32 +657,15 @@ real_bsdthread_register(struct proc *p,
 		}
 
 		data.stack_addr_hint = stackaddr;
-		// DAR-280: this used to be 0 (no bits set), which tells
-		// libpthread's real _pthread_mutex_init() that ulock-based mutex/
-		// condvar sync is NOT available, so __pthread_mutex_use_ulock stays
-		// false and _pthread_mutex_uses_ulock()/every pthread_cond_wait()
-		// falls through to the PSYNCH path - __psynch_cvwait/cvsignal/
-		// cvbroad/cvclrprepost (and psynch_mutexwait/psynch_mutexdrop for
-		// a genuinely CONTENDED mutex) are all wired to stub_psynch_error()
-		// in bsd_pthread_stub.c, unconditional ENOTSUP, never implemented.
-		// libpthread's real pthread_cond.c doesn't expect that return from
-		// the kernel and mishandles it, reading through what ends up being
-		// a NULL/garbage pointer - the real cause of DAR-280's SIGSEGV
-		// (far 0x26) inside _pthread_cond_wait. An UNCONTENDED
-		// pthread_mutex_lock/unlock never reaches psynch_mutexwait at all
-		// (pure userspace CAS fast path), which is why plain mutex use has
-		// looked fine in every test so far - contended mutexes would hit
-		// the identical stubbed-syscall problem, just not exercised yet.
-		// sys_ulock.c's ulock_wait()/ulock_wake()/ulock_wait2() ARE real,
-		// full implementations (not stubs) and already QEMU-verified for
-		// the mutex fast path - setting USE_ULOCK here is the real,
-		// Apple-defined way (this exact struct/bit, kern_internal.h in
-		// apple-oss-distributions libpthread) to route mutex AND condvar
-		// sync through that already-working path instead of the
-		// unimplemented psynch_* syscalls. Not setting
-		// USE_ADAPTIVE_SPIN alongside it - that bit is a separate,
-		// unverified optimization, not needed to fix this bug.
-		data.mutex_default_policy = _PTHREAD_REG_DEFAULT_USE_ULOCK;
+		// kern_support.c:635. DAR-280 hard-coded
+		// _PTHREAD_REG_DEFAULT_USE_ULOCK here, because psynch_* were
+		// ENOTSUP stubs. They are real since DAR-416 (bsd_pthread_synch.c
+		// is kern_synch.c), so this is Apple's value again: 0 unless the
+		// pthread_mutex_default_policy boot-arg sets it (real_pthread_init
+		// below). With 0, userland keeps _PTHREAD_MTX_OPT_ULOCK_DEFAULT
+		// (false, libpthread types_internal.h:187) and every mutex uses
+		// psynch, as on macOS 11.
+		data.mutex_default_policy = pthread_mutex_default_policy;
 
 		kr = copyout(&data, pthread_init_data, pthread_init_sz);
 		if (kr != KERN_SUCCESS) {
@@ -997,4 +984,50 @@ real_thread_selfid(__unused struct proc *p, uint64_t *retval)
 	thread_t thread = current_thread();
 	*retval = thread_tid(thread);
 	return KERN_SUCCESS;
+}
+
+#pragma mark - _pthread_init (kern_support.c:116-118, 995-1009)
+
+/*
+ * DAR-416: pthread.kext's init, needed now that bsd_pthread_synch.c
+ * (kern_synch.c) is linked in. Ported from kern_support.c:116-118 (the
+ * lock group/attr globals) and :995-1014 (_pthread_init, including the
+ * pthread_mutex_default_policy boot-arg). Not ported: the sysctl at
+ * :164-165/:1016, as this kernel has no kern.pthread_mutex_default_policy
+ * consumer.
+ */
+lck_grp_attr_t   *pthread_lck_grp_attr;
+lck_grp_t    *pthread_lck_grp;
+lck_attr_t   *pthread_lck_attr;
+/* kern_support.c:160 (it has no sysctl there either); read by
+ * kern_trace.h:70's PTHREAD_TRACE() in bsd_pthread_synch.c. */
+uint32_t pthread_debug_tracing = 1;
+
+extern lck_mtx_t *pthread_list_mlock;       /* bsd_pthread_synch.c */
+extern thread_call_t psynch_thcall;         /* bsd_pthread_synch.c */
+extern void pth_global_hashinit(void);
+extern void psynch_wq_cleanup(void *, void *);
+extern void psynch_zoneinit(void);
+
+void real_pthread_init(void);
+void
+real_pthread_init(void)
+{
+	pthread_lck_grp_attr = lck_grp_attr_alloc_init();
+	pthread_lck_grp = lck_grp_alloc_init("pthread", pthread_lck_grp_attr);
+
+	/*
+	 * allocate the lock attribute for pthread synchronizers
+	 */
+	pthread_lck_attr = lck_attr_alloc_init();
+	pthread_list_mlock = lck_mtx_alloc_init(pthread_lck_grp, pthread_lck_attr);
+
+	pth_global_hashinit();
+	psynch_thcall = thread_call_allocate(psynch_wq_cleanup, NULL);
+	psynch_zoneinit();
+
+	int policy_bootarg;
+	if (PE_parse_boot_argn("pthread_mutex_default_policy", &policy_bootarg, sizeof(policy_bootarg))) {
+		pthread_mutex_default_policy = policy_bootarg;
+	}
 }

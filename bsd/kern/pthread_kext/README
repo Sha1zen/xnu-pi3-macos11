@@ -1,0 +1,35 @@
+pthread.kext's private headers, copied from third_party/libpthread/kern/
+(libpthread-454.80.2, the macos-112 pin) for bsd_pthread_synch.c, which is
+that repo's kern/kern_synch.c (DAR-416). This kernel links the pthread
+"kext" in directly; there is no kext build to supply libpthread's include
+paths.
+
+Copied unchanged except:
+  kern_internal.h:46-47  "kern/synch_internal.h" / "kern/kern_trace.h"
+                         -> "synch_internal.h" / "kern_trace.h" (same dir).
+  kern_internal.h:29-30,209  include guard _SYS_PTHREAD_INTERNAL_H_ ->
+                         _PTHREAD_KEXT_KERN_INTERNAL_H_: xnu's own
+                         bsd/sys/pthread_internal.h uses the same guard.
+                         With BSD_KERNEL_PRIVATE, sys/user.h:87-88 includes
+                         it first and this whole header is skipped. The
+                         object is now built without BSD_KERNEL_PRIVATE
+                         (bsd/conf/Makefile.template), so the rename is
+                         belt-and-braces.
+  kern_internal.h:48-49  removed #include "pthread/qos.h" and
+                         "pthread/qos_private.h" (libpthread's userland QoS
+                         headers; nothing in these headers or in
+                         kern_synch.c uses them -- the kernel QoS types come
+                         from xnu's own <pthread/priority_private.h> and
+                         <mach/thread_policy.h>).
+  kern_internal.h:149     added `typedef unsigned int _pthread_set_flags_t;`
+                         -- the type of the enum at libpthread
+                         private/pthread/qos_private.h:62, needed only by
+                         the _bsdthread_ctl_set_self prototype after the
+                         include above was dropped.
+bsd_pthread_synch.c differs from kern/kern_synch.c only in its three
+#include "kern/..." lines (-> "pthread_kext/...").
+
+Size note: the real struct ksyn_waitq_element here is 56 bytes on LP64;
+xnu's opaque stand-in (bsd/sys/pthread_internal.h:35-41) reserves 48. It
+lives in struct uthread's uu_save union (sys/user.h:130-190), whose
+kevent member is larger, so it fits. Stock xnu-7195 has the same mismatch.

@@ -882,7 +882,7 @@ sIODWBuiltinPanelPowerKey = OSSymbol::withCString("AAPL,builtin-panel-power");
 
 // Reconstructed from its only real use (builtinPanelPowerNotify, below) --
 // declared nowhere in the published sources. See
-// tools/patch_iographics_gaps.sh. Inert on this project: nothing here
+// IOGraphics fork commit 6f5b82096731. Inert on this project: nothing here
 // parses a kIOMessageServicePropertyChange for
 // AAPL,builtin-panel-power (no WindowServer/AppleGraphicsControl
 // client exists), so this is only the shape the sender needs to build.

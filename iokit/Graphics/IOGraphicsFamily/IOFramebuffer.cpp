@@ -152,7 +152,7 @@ enum
 
 // No real notification-port client exists on this project (no
 // WindowServer-equivalent) to pin this to Apple's real internal
-// revision cutover -- see tools/patch_iographics_gaps.sh. One past this
+// revision cutover -- see IOGraphics fork commit 222071967b65. One past this
 // drop's own published IOGRAPHICSTYPES_REV (IOGraphicsTypes.h:34) so the
 // comparison at IOFramebuffer.cpp:8780 can never spuriously be true.
 #define kServerAckProtocolGraphicsTypesRev (IOGRAPHICSTYPES_REV + 1)
@@ -684,10 +684,10 @@ struct IOFramebufferPrivate
     uint16_t                    fServerMsgCount;     // Current sent server msg
     integer_t                   fServerMsgIDSentPower;
     integer_t                   fServerMsgIDAckedPower;
-    integer_t                   fServerMsgIDSentDim;      // patched, see tools/patch_iographics_gaps.sh
+    integer_t                   fServerMsgIDSentDim;      // see IOGraphics fork commit da4da8492285
 
-    IOInterruptEventSource *    fCloseWorkES;             // patched, see tools/patch_iographics_gaps.sh
-    bool                        fClosePending;            // patched, see tools/patch_iographics_gaps.sh
+    IOInterruptEventSource *    fCloseWorkES;             // see IOGraphics fork commit da4da8492285
+    bool                        fClosePending;            // see IOGraphics fork commit da4da8492285
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -6315,7 +6315,7 @@ void IOFramebuffer::saveFramebuffer(void)
 				kern_return_t kr = 
 #endif
 				/* was vm_map_wire(); XNU_KERNEL_PRIVATE hides that name, see
-				 * tools/patch_iographics_gaps.sh */
+				 * IOGraphics fork commit f9a0edf46b2a */
 				vm_map_wire_kernel( IOPageableMapForAddress( (vm_address_t) __private->saveFramebuffer ),
 							 (vm_address_t) __private->saveFramebuffer,
 							 ((vm_address_t) __private->saveFramebuffer) + __private->saveLength,
@@ -12897,7 +12897,7 @@ IOReturn IOFramebuffer::setCLUTWithEntries(
 }
 
 //// Gamma
-// Base body -- see tools/patch_iographics_gaps.sh fix 10. Declared at
+// Base body -- see IOGraphics fork commit 4086ffba93df. Declared at
 // IOFramebuffer.h:396 for vendor subclasses; never published.
 IOReturn IOFramebuffer::diagnoseReport( void * /* param1 */, void * /* param2 */,
                                         void * /* param3 */, void * /* param4 */ )

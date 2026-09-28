@@ -134,7 +134,7 @@ public:
     virtual void joinPMtree ( IOService * driver ) APPLE_KEXT_OVERRIDE;
 
     // Declared here, defined IODisplayWrangler.cpp -- see
-    // tools/patch_iographics_gaps.sh.
+    // IOGraphics fork commit 2a5400da74d9.
     uint64_t getFBRegistryID(void);
     void recordGTraceToken(const uint16_t line,
                            const uint16_t tag0, const uint64_t fbRegID,

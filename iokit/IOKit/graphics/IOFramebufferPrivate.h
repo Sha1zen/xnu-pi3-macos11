@@ -135,7 +135,7 @@ protected:
                            IOInterruptEventSource * evtSrc, int intCount);
 
     // Reconstructed -- no declaration exists in the published drop. See
-    // tools/patch_iographics_gaps.sh for the real call-site evidence
+    // IOGraphics fork commit bd44bd02127e for the real call-site evidence
     // both semantics (return value, kick-or-not) are inferred from.
     static void triggerEvent(uint32_t event);
     static uint_fast32_t clearEvent(uint32_t event);
@@ -332,12 +332,12 @@ public:
 
     // Declared here, defined IOFramebuffer.cpp:2428 -- called from
     // IODisplay.cpp:484 (a friend class, see IOFramebuffer.h:277), and
-    // published nowhere. See tools/patch_iographics_gaps.sh.
+    // published nowhere. See IOGraphics fork commit 57745ffb4f43.
     void sysAssertGated(void);
 
     // breadcrumb_func for GTraceBuffer::make() (IOFramebuffer.cpp:1966,
     // 1971). No-op: this project has no gtrace decode module for either
-    // buffer to serve data to. See tools/patch_iographics_gaps.sh.
+    // buffer to serve data to. See IOGraphics fork commit 288df1cb3c5b.
     static IOReturn gTraceData(void * context, void * buffer, uint16_t * sizeP);
     static IOReturn agdcTraceData(void * context, void * buffer, uint16_t * sizeP);
 

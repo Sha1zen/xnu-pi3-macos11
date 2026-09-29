@@ -493,6 +493,14 @@ enum {
 #define BCM2837_FB_HEIGHT 480
 #define BCM2837_FB_DEPTH  32
 
+/* Bounds for the "fb_width"/"fb_height" boot-args: the framebuffer is
+ * gpu_mem-backed (config.txt gpu_mem=64) and 1920x1200x4 is ~9.2 MB, so
+ * anything in this range fits; values outside it are ignored. */
+#define BCM2837_FB_MIN_W 320
+#define BCM2837_FB_MAX_W 1920
+#define BCM2837_FB_MIN_H 200
+#define BCM2837_FB_MAX_H 1200
+
 /*
  * Submits msg (msg[kMsgIdxSize] must already be set to the total buffer
  * size in bytes) over the property-tag channel and blocks until the GPU
@@ -587,19 +595,32 @@ bcm2837_video_init(PE_Video *video)
 	static uint32_t sMboxMsg[kBcm2837MsgWords] __attribute__((aligned(16)));
 	uint32_t *b = sMboxMsg;
 
+	/* Requested size: BCM2837_FB_WIDTH x BCM2837_FB_HEIGHT unless BOTH
+	 * "fb_width" and "fb_height" boot-args are given and in range (set
+	 * them on real hardware with uEnv.txt's extra_bootargs). */
+	uint32_t reqW = BCM2837_FB_WIDTH, reqH = BCM2837_FB_HEIGHT;
+	uint32_t argW = 0, argH = 0;
+	if (PE_parse_boot_argn("fb_width", &argW, sizeof(argW)) &&
+	    PE_parse_boot_argn("fb_height", &argH, sizeof(argH)) &&
+	    argW >= BCM2837_FB_MIN_W && argW <= BCM2837_FB_MAX_W &&
+	    argH >= BCM2837_FB_MIN_H && argH <= BCM2837_FB_MAX_H) {
+		reqW = argW;
+		reqH = argH;
+	}
+
 	b[kMsgIdxCode] = 0; /* RPI_FIRMWARE_STATUS_REQUEST */
 
 	b[kMsgIdxPhysWHTag] = kBcm2837TagSetPhysicalWH;
 	b[kMsgIdxPhysWHBufSize] = 8;
 	b[kMsgIdxPhysWHReqSize] = 0;
-	b[kMsgIdxPhysW] = BCM2837_FB_WIDTH;
-	b[kMsgIdxPhysH] = BCM2837_FB_HEIGHT;
+	b[kMsgIdxPhysW] = reqW;
+	b[kMsgIdxPhysH] = reqH;
 
 	b[kMsgIdxVirtWHTag] = kBcm2837TagSetVirtualWH;
 	b[kMsgIdxVirtWHBufSize] = 8;
 	b[kMsgIdxVirtWHReqSize] = 0;
-	b[kMsgIdxVirtW] = BCM2837_FB_WIDTH;
-	b[kMsgIdxVirtH] = BCM2837_FB_HEIGHT;
+	b[kMsgIdxVirtW] = reqW;
+	b[kMsgIdxVirtH] = reqH;
 
 	b[kMsgIdxDepthTag] = kBcm2837TagSetDepth;
 	b[kMsgIdxDepthBufSize] = 4;
@@ -657,8 +678,19 @@ bcm2837_video_init(PE_Video *video)
 	video->v_baseAddr = fbPhysAddr;
 	video->v_length = fbSize;
 	video->v_rowBytes = fbPitch;
-	video->v_width = BCM2837_FB_WIDTH;
-	video->v_height = BCM2837_FB_HEIGHT;
+	/* The property-tag interface overwrites each tag's value words with
+	 * what the firmware actually set, so a size it adjusted is reported
+	 * here; fall back to the request if a word came back zero. */
+	uint32_t gotW = b[kMsgIdxPhysW];
+	uint32_t gotH = b[kMsgIdxPhysH];
+	if (gotW == 0 || gotH == 0) {
+		gotW = reqW;
+		gotH = reqH;
+	}
+	kprintf("bcm2837_video_init: %ux%u requested, %ux%u granted, pitch %u\n",
+	    reqW, reqH, gotW, gotH, fbPitch);
+	video->v_width = gotW;
+	video->v_height = gotH;
 	video->v_depth = BCM2837_FB_DEPTH;
 	/* 0 -> PE_create_console() picks kPETextMode, so kPEAcquireScreen
 	 * (kern/startup.c:721) runs gc_enable(TRUE) and the framebuffer

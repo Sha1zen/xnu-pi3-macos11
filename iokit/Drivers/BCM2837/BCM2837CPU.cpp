@@ -3,7 +3,6 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
-#include <IOKit/IODeviceMemory.h>
 #include <string.h>
 
 // Same two headers, same reason, as iokit/Kernel/IOCPU.cpp:31-35 pulls
@@ -25,6 +24,10 @@ extern "C" {
 // BCM2837-only code in osfmk/arm64/start.s.
 kern_return_t processor_start(processor_t processor);
 extern char bcm2837_secondary_entry[];
+// Defined at osfmk/arm64/machine_routines.c:1354; its prototype in
+// osfmk/arm/machine_routines.h:639-643 is visible only to
+// PEXPERT_KERNEL_PRIVATE/MACH_KERNEL_PRIVATE code, not IOKit.
+vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 }
 
 #define super IOCPU
@@ -484,17 +487,17 @@ BCM2837CPU::startCPU(vm_offset_t /*start_paddr*/, vm_offset_t /*arg_paddr*/)
 	if (sSpinTable == NULL) {
 		// Page 0 holds the stub and the table; map it once, as device
 		// memory, so neither our write nor our reads go through a cache.
-		// Same pattern as BCM2837PlatformExpert's PM-block map;
-		// kIOMapInhibitCache makes it device memory explicitly. The map
-		// is kept for the life of the system.
-		IODeviceMemory *mem = IODeviceMemory::withRange(0, PAGE_SIZE);
-		IOMemoryMap *map = (mem != NULL) ? mem->map(kIOMapInhibitCache) : NULL;
-		OSSafeReleaseNULL(mem);
-		if (map == NULL) {
+		// Not IODeviceMemory: IOKit asserts a mapping's first physical
+		// address is non-zero (iokit/Kernel/IOMemoryDescriptor.cpp:5013,
+		// a panic on the first QEMU try). ml_io_map() maps it VM_WIMG_IO
+		// (device memory) through pmap_map(), which takes page 0 like any
+		// other (osfmk/arm64/machine_routines.c:1354-1359,
+		// osfmk/arm/pmap.c:4100-4126). Kept for the life of the system.
+		vm_offset_t va = ml_io_map(0, PAGE_SIZE);
+		if (va == 0) {
 			IOLog("BCM2837CPU: startCPU: cannot map the spin-table page\n");
 			return KERN_FAILURE;
 		}
-		vm_offset_t va = (vm_offset_t)map->getVirtualAddress();
 		sSpinTable = (volatile uint64_t *)(va + kSpinTablePhys);
 		// Diagnostic for the real Pi: the first words of the firmware stub
 		// (armstub8.S:98 onwards) and the table as we found it.

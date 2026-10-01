@@ -3,6 +3,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IODeviceMemory.h>
 #include <string.h>
 
 // Same two headers, same reason, as iokit/Kernel/IOCPU.cpp:31-35 pulls
@@ -483,11 +484,17 @@ BCM2837CPU::startCPU(vm_offset_t /*start_paddr*/, vm_offset_t /*arg_paddr*/)
 	if (sSpinTable == NULL) {
 		// Page 0 holds the stub and the table; map it once, as device
 		// memory, so neither our write nor our reads go through a cache.
-		vm_offset_t va = ml_io_map(0, PAGE_SIZE);
-		if (va == 0) {
+		// Same pattern as BCM2837PlatformExpert's PM-block map;
+		// kIOMapInhibitCache makes it device memory explicitly. The map
+		// is kept for the life of the system.
+		IODeviceMemory *mem = IODeviceMemory::withRange(0, PAGE_SIZE);
+		IOMemoryMap *map = (mem != NULL) ? mem->map(kIOMapInhibitCache) : NULL;
+		OSSafeReleaseNULL(mem);
+		if (map == NULL) {
 			IOLog("BCM2837CPU: startCPU: cannot map the spin-table page\n");
 			return KERN_FAILURE;
 		}
+		vm_offset_t va = (vm_offset_t)map->getVirtualAddress();
 		sSpinTable = (volatile uint64_t *)(va + kSpinTablePhys);
 		// Diagnostic for the real Pi: the first words of the firmware stub
 		// (armstub8.S:98 onwards) and the table as we found it.

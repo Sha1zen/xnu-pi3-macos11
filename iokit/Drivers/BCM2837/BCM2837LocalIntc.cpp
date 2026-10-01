@@ -73,6 +73,9 @@ BCM2837LocalIntc::init(OSDictionary *propTable)
 }
 
 BCM2837LocalIntc *BCM2837LocalIntc::sInstance = NULL;
+
+// TEMP DIAGNOSTIC (DAR-455): per-core IPI send/receive counts.
+static volatile uint32_t sIPISent[4], sIPIRecv[4];
 void (*BCM2837LocalIntc::sIPIHandler)(void) = NULL;
 
 void
@@ -101,6 +104,10 @@ BCM2837LocalIntc::sendIPI(UInt32 core)
 	}
 	// DAR-455: the target core's mailbox 0 (core 0 only, before).
 	me->fRegBase[kRegMailbox0Set0 + core * kCoreStrideMbox] = 1;
+	uint32_t n = OSIncrementAtomic((volatile SInt32 *)&sIPISent[core]) + 1;
+	if (n == 1 || (n & 0xFFF) == 0) {
+		kprintf("BCM2837LocalIntc: DIAG IPI sent to core %u: %u\n", (unsigned)core, n);
+	}
 	return true;
 }
 
@@ -320,6 +327,10 @@ BCM2837LocalIntc::handleInterrupt(void * /*refCon*/, IOService * /*nub*/, int /*
 		// Write-1-to-clear: one bit is all this mailbox is ever used for.
 		fRegBase[kRegMailbox0Clr0 + core * kCoreStrideMbox] = 0xFFFFFFFF;
 		__asm__ volatile ("dsb sy" ::: "memory");
+		uint32_t n = OSIncrementAtomic((volatile SInt32 *)&sIPIRecv[core]) + 1;
+		if (n == 1 || (n & 0xFFF) == 0) {
+			kprintf("BCM2837LocalIntc: DIAG IPI recv on core %u: %u\n", (unsigned)core, n);
+		}
 		void (*handler)(void) = sIPIHandler;
 		if (handler != NULL) {
 			handler();

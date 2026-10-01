@@ -856,6 +856,16 @@ ml_parse_cpu_topology(void)
 	int64_t cluster_phys_to_logical[MAX_CPU_CLUSTER_PHY_ID + 1];
 	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
 	cpu_boot_arg = MAX_CPUS;
+#if defined(BCM2837)
+	/*
+	 * DAR-455: the Raspberry Pi 3 port ran on one core until its secondary
+	 * bring-up existed, and SMP is still opt-in there: keep only the boot
+	 * CPU unless the boot-args ask for more with Apple's own cpus=N. With
+	 * the DT listing all four cores, the default keeps every boot exactly
+	 * as it was (one topology CPU, one IOCPU, hw.ncpu 1).
+	 */
+	cpu_boot_arg = 1;
+#endif
 	PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
 
 	err = SecureDTLookupEntry(NULL, "/cpus", &entry);

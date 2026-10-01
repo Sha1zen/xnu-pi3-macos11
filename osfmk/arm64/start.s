@@ -319,6 +319,73 @@ LEXT(ResetHandlerData)
 LEXT(_start)
 	b	EXT(start_first_cpu)
 
+#if defined(BCM2837)
+/*
+ * bcm2837_secondary_entry (DAR-455)
+ *
+ * Where a Raspberry Pi 3 secondary core starts when BCM2837CPU::startCPU()
+ * writes this function's physical address into the firmware's spin table.
+ * The firmware's armstub8 leaves cores 1-3 at EL2h, MMU and caches off,
+ * DAIF masked, CPUECTLR_EL1.SMPEN already set at EL3, and branches here
+ * with x0 = 0 (raspberrypi/tools armstubs/armstub8.S:122-171). QEMU's
+ * raspi3 "xnu-smp" option reproduces that state. Runs at its physical
+ * address; everything here is PC-relative or a system register.
+ *
+ * Core 0 is dropped from EL2 to EL1 by u-boot's bootxnu before XNU runs
+ * (third_party/u-boot/cmd/bootxnu.c:193-198); nothing does that for the
+ * secondaries, so do the same here, register for register, after u-boot's
+ * armv8_switch_to_el1_m (third_party/u-boot/arch/arm/include/asm/
+ * macro.h:241-300; HCR_EL2 = RW|HCD, SPSR_EL2 = DAIF|EL1h), then enter the
+ * kernel exactly as an Apple core leaving reset does: at
+ * LowResetVectorBase, which finds this core's cpu_data by MPIDR and
+ * continues into start_cpu (reset_vector above). A core already at EL1
+ * goes straight there.
+ */
+	.align	3
+	.globl EXT(bcm2837_secondary_entry)
+LEXT(bcm2837_secondary_entry)
+	msr		DAIFSet, #(DAIFSC_ALL)
+	mrs		x0, CurrentEL
+	cmp		x0, #(PSR64_MODE_EL2)
+	b.ne	Lbcm2837_secondary_el1
+
+	// EL1 access to the physical timer/counter, no virtual offset: every
+	// core must see the same CNTVCT, which XNU's timebase reads.
+	mrs		x0, CNTHCTL_EL2
+	orr		x0, x0, #3						// EL1PCEN | EL1PCTEN
+	msr		CNTHCTL_EL2, x0
+	msr		CNTVOFF_EL2, xzr
+	// EL1 reads of MIDR/MPIDR return these.
+	mrs		x0, MIDR_EL1
+	msr		VPIDR_EL2, x0
+	mrs		x0, MPIDR_EL1
+	msr		VMPIDR_EL2, x0
+	// No coprocessor/FP traps to EL2.
+	mov		x0, #0x33ff						// CPTR_EL2 RES1 bits
+	msr		CPTR_EL2, x0
+	msr		HSTR_EL2, xzr
+	mov		x0, #(3 << 20)					// CPACR_EL1.FPEN
+	msr		CPACR_EL1, x0
+	// SCTLR_EL1: RES1 bits only, MMU/caches off, little-endian.
+	movz	x0, #0x0800
+	movk	x0, #0x30d0, lsl #16
+	msr		SCTLR_EL1, x0
+	// EL1 is AArch64; HVC disabled.
+	movz	x0, #0xa000, lsl #16			// HCR_EL2.RW | HCR_EL2.HCD
+	msr		HCR_EL2, x0
+	// eret to EL1h with D, A, I, F masked.
+	mov		x0, #0x3c5
+	msr		SPSR_EL2, x0
+	adrp	x0, EXT(LowResetVectorBase)@page
+	add		x0, x0, EXT(LowResetVectorBase)@pageoff
+	msr		ELR_EL2, x0
+	isb
+	eret
+
+Lbcm2837_secondary_el1:
+	b		EXT(LowResetVectorBase)
+#endif /* defined(BCM2837) */
+
 
 /*
  * Provides an early-boot exception vector so that the processor will spin

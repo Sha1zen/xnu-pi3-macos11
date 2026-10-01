@@ -873,6 +873,29 @@ cpu_start(int cpu)
 		 * investigation. volatile: LTO dead-strips otherwise. */
 		diag_cpu_start_cpu_id = (unsigned long)cpu_data_ptr->cpu_id;
 		diag_cpu_start_called = TRUE;
+#if defined(BCM2837)
+		/*
+		 * DAR-455. A Cortex-A53 woken from the Pi firmware's spin table
+		 * runs reset_vector/start_cpu/common_start with its MMU and
+		 * D-cache off, so every load it makes before enabling the MMU
+		 * goes to DRAM and misses data still dirty in the other cores'
+		 * caches. The two flushes above cover CpuDataEntries and this
+		 * cpu_data; these are the rest of what that path reads with the
+		 * MMU off: ResetHandlerData (start.s reset_vector, filled at
+		 * cpu_machine_idle_init()), the boot args (start_cpu's
+		 * BA_VIRT_BASE/BA_PHYS_BASE/...), sysreg_restore (common_start's
+		 * TCR_EL1) and cpu_ttep (common_start's TTBR1). Clean by VA to
+		 * PoC: by-VA maintenance is broadcast to every core's cache,
+		 * set/way maintenance is not. Apple's own cores need none of
+		 * this: their CleanPoC_Dcache() is a no-op, "Fully Coherent"
+		 * (caches_asm.s, APPLE_ARM64_ARCH_FAMILY). QEMU does not model
+		 * caches, so only real hardware can show this is complete.
+		 */
+		clean_dcache((vm_offset_t)&ResetHandlerData, sizeof(ResetHandlerData), FALSE);
+		clean_dcache((vm_offset_t)BootArgs, sizeof(*BootArgs), FALSE);   /* == &const_boot_args, arm_init.c:310 */
+		clean_dcache((vm_offset_t)&sysreg_restore, sizeof(sysreg_restore), FALSE);
+		clean_dcache((vm_offset_t)&cpu_ttep, sizeof(cpu_ttep), FALSE);
+#endif
 		(void) PE_cpu_start(cpu_data_ptr->cpu_id, (vm_offset_t)NULL, (vm_offset_t)NULL);
 	}
 

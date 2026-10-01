@@ -32,6 +32,7 @@
 #include <libkern/crypto/sha2.h>
 #include <machine/machine_cpu.h>
 #include <machine/machine_routines.h>
+#include <machine/atomic.h>
 #include <pexpert/pexpert.h>
 #include <sys/random.h>
 #include <prng/random.h>
@@ -222,12 +223,30 @@ early_random(void)
 static void
 read_random_generate(uint8_t *buffer, size_t numbytes);
 
-static void
+static /*
+ * DAR-455 / COMPAT (this port only, see read_random() below): the kernel
+ * PRNG is installed by the corecrypto kext (register_and_init_prng()), which
+ * this from-source kernel never loads, so prng_ready stays 0 forever and
+ * every read_random()/read_erandom() caller lands on the early-boot DRBG
+ * below for the whole uptime. Upstream, that DRBG only ever runs on the
+ * boot CPU before corecrypto takes over (the comment above "We defer to the
+ * kernel PRNG..."), so its single global state (erandom.drbg_state) has no
+ * lock. With secondary cores running (cpus=N on BCM2837), two cores could
+ * run ccdrbg_generate() on that state at once. Serialise it: interrupts off
+ * (it is also reached from interrupt context) plus a spin flag. This is
+ * inert on one CPU, and on early boot (interrupts already masked,
+ * ml_set_interrupts_enabled() then touches no thread state,
+ * osfmk/arm/machine_routines_common.c:814-860).
+ */
+static _Atomic uint32_t erandom_busy;
+
+void
 read_erandom(void * buf, size_t nbytes)
 {
 	uint8_t * buffer_bytes = buf;
 	size_t n;
 	int rc;
+	boolean_t istate;
 
 	// We defer to the kernel PRNG after it has been installed and
 	// initialized. This happens during corecrypto kext
@@ -235,6 +254,11 @@ read_erandom(void * buf, size_t nbytes)
 	if (prng_ready) {
 		read_random_generate(buf, nbytes);
 		return;
+	}
+
+	istate = ml_set_interrupts_enabled(FALSE);
+	while (!os_atomic_cmpxchg(&erandom_busy, 0, 1, acquire)) {
+		;
 	}
 
 	// The DBRG request size is limited, so we break the request into
@@ -252,6 +276,9 @@ read_erandom(void * buf, size_t nbytes)
 		buffer_bytes += n;
 		nbytes -= n;
 	}
+
+	os_atomic_store(&erandom_busy, 0, release);
+	(void) ml_set_interrupts_enabled(istate);
 }
 
 void
@@ -286,7 +313,17 @@ random_cpu_init(int cpu)
 	assert(cpu != master_cpu);
 
 	if (!prng_ready) {
-		panic("random_cpu_init: kernel prng has not been installed");
+		/*
+		 * DAR-455 / COMPAT: on this port the kernel PRNG is never
+		 * installed (no corecrypto kext; see read_erandom()), so there is
+		 * no per-CPU generator to initialise: every consumer falls back to
+		 * the shared early DRBG (read_random() and read_erandom() below
+		 * and above both check prng_ready first). Upstream panics here
+		 * because corecrypto always registers before secondary CPUs come
+		 * up; ml_processor_register() calls this for every non-boot CPU
+		 * (osfmk/arm64/machine_routines.c).
+		 */
+		return;
 	}
 
 	prng_funcs.initgen(prng_ctx, cpu);

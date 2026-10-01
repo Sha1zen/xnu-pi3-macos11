@@ -66,6 +66,10 @@ enum {
 };
 static volatile uint64_t *sSpinTable = NULL;
 
+// DAR-455 diagnostic: the boot CPU's mach_absolute_time() just before it
+// releases a core, read back on that core to check the two timebases agree.
+static volatile uint64_t sReleaseStamp;
+
 // Defensive name re-check (backlog item 13) - every other DT-matched
 // driver in this tree (BCM2837ArmIO, BCM2837InterruptController,
 // BCM2837LocalIntc, BCM2837SDHCI) already re-verifies provider->getName()
@@ -261,9 +265,17 @@ BCM2837CPU::initCPU(bool boot)
 			signalCPU(this);
 		}
 		setCPUState(kIOCPUStateRunning);
-		kprintf("BCM2837CPU: cpu%u (core %u) initCPU on core %llu\n",
+		uint64_t now = mach_absolute_time();
+		uint64_t vct = __builtin_arm_rsr64("CNTVCT_EL0");
+		uint64_t pct = __builtin_arm_rsr64("CNTPCT_EL0");
+		kprintf("BCM2837CPU: cpu%u (core %u) initCPU on core %llu; "
+		    "abstime %llu, boot CPU released at %llu (delta %lld), "
+		    "CNTPCT-CNTVCT %lld, CNTFRQ %llu\n",
 		    (unsigned)fLogicalID, (unsigned)fPhysID,
-		    (unsigned long long)(__builtin_arm_rsr64("MPIDR_EL1") & 0xff));
+		    (unsigned long long)(__builtin_arm_rsr64("MPIDR_EL1") & 0xff),
+		    (unsigned long long)now, (unsigned long long)sReleaseStamp,
+		    (long long)(now - sReleaseStamp), (long long)(pct - vct),
+		    (unsigned long long)__builtin_arm_rsr64("CNTFRQ_EL0"));
 		return;
 	}
 
@@ -520,6 +532,7 @@ BCM2837CPU::startCPU(vm_offset_t /*start_paddr*/, vm_offset_t /*arg_paddr*/)
 	uint64_t entry = (uint64_t)ml_static_vtop((vm_offset_t)bcm2837_secondary_entry);
 	IOLog("BCM2837CPU: releasing core %u at PA 0x%llx\n", (unsigned)fPhysID,
 	    (unsigned long long)entry);
+	sReleaseStamp = mach_absolute_time();
 	sSpinTable[fPhysID] = entry;
 	// Store complete before the event that wakes the core's WFE.
 	__asm__ volatile ("dsb sy" ::: "memory");

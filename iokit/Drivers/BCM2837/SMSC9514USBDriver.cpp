@@ -32,7 +32,7 @@ SMSC9514FamilyTransport::SMSC9514FamilyTransport()
 	: fDevice(NULL), fBulkIn(NULL), fBulkOut(NULL), fRxMD(NULL), fTxMD(NULL),
 	  fLock(NULL), fTxLock(NULL), fRxQueued(false), fRxDone(false), fRxLen(0),
 	  fStopping(false), fRxStalled(false), fRxErrors(0),
-	  fTxStallEvents(0), fTxFailures(0)
+	  fTxStallEvents(0), fTxFailures(0), fTxZlps(0)
 {
 }
 
@@ -275,10 +275,58 @@ SMSC9514FamilyTransport::bulkOut(const void *buf, uint32_t len)
 		}
 		fTxStallEvents++;
 		if (fTxStallEvents <= 4 || (fTxStallEvents & (fTxStallEvents - 1)) == 0) {
+			/*
+			 * DAR-465 run-1 follow-up: the frame's own TX_CMD_A/B and
+			 * whether the DMA-able copy still matches the caller's
+			 * frame. TX_CMD_A = FIRST_SEG|LAST_SEG|len-8 and TX_CMD_B =
+			 * len-8 (smsc95xx_tx_fixup(), smsc95xx.c:1950-1951, v6.6);
+			 * "hdr-mismatch" flags anything else.
+			 */
+			const uint8_t *tx = (const uint8_t *)fTxMD->getBytesNoCopy();
+			uint32_t cmdA = (uint32_t)tx[0] | ((uint32_t)tx[1] << 8) |
+			    ((uint32_t)tx[2] << 16) | ((uint32_t)tx[3] << 24);
+			uint32_t cmdB = (uint32_t)tx[4] | ((uint32_t)tx[5] << 8) |
+			    ((uint32_t)tx[6] << 16) | ((uint32_t)tx[7] << 24);
+			bool hdrOK = len >= 8 && (cmdA & 0x7FF) == len - 8 &&
+			    (cmdB & 0x7FF) == len - 8 && (cmdA & 0x3000) == 0x3000;
+			bool same = (memcmp(tx, buf, len) == 0);
 			IOLog("SMSC9514FamilyTransport: bulk OUT %s %#x (event #%u, %u bytes): "
-			    "ClearPipeStall(true) %#x, %s %#x\n",
+			    "ClearPipeStall(true) %#x, %s %#x; TX_CMD_A=%#x TX_CMD_B=%#x%s, "
+			    "buffer %p %s\n",
 			    timedOut ? "timed out" : "stalled", first, fTxStallEvents, len, clr,
-			    timedOut ? "not retried, returning" : "retry", ret);
+			    timedOut ? "not retried, returning" : "retry", ret, cmdA, cmdB,
+			    hdrOK ? "" : " [hdr-mismatch]", tx,
+			    same ? "matches the frame" : "CHANGED since submit");
+		}
+	}
+	/*
+	 * DAR-465: end every transfer with a short packet. A transfer whose
+	 * length is an exact multiple of the endpoint's max packet size (512 at
+	 * high speed: a 504- or 1016-byte frame plus the 8-byte TX_CMD_A/B)
+	 * otherwise ends on a full packet, and the device cannot tell where it
+	 * stops. Linux's smsc95xx asks usbnet for exactly this zero-length
+	 * packet: FLAG_SEND_ZLP (drivers/net/usb/smsc95xx.c:2013, v6.6), which
+	 * usbnet_start_xmit() turns into URB_ZERO_PACKET when
+	 * `length % dev->maxpacket == 0` (drivers/net/usb/usbnet.c:1399-1411).
+	 * This driver never sent one. HYPOTHESIS (DAR-313), from the first Pi
+	 * run: both wedges began with the device STALLing the third, short
+	 * packet of a 1522-byte transfer after accepting the first 1024 bytes,
+	 * which is what a device that merged the previous, unterminated
+	 * transfer into this one and rejected it at the next short packet
+	 * would do. BCM2837DWC2's DAR-465 OUT history line, logged at the
+	 * first STALL, shows whether the previous transfer needed a ZLP.
+	 */
+	if (ret == kIOReturnSuccess) {
+		UInt16 mps = fBulkOut->GetMaxPacketSize();
+		if (mps != 0 && (len % mps) == 0) {
+			IOReturn zret = fBulkOut->Write(fTxMD, kTxNoDataTimeoutMS,
+			    kTxCompletionTimeoutMS, 0);
+			fTxZlps++;
+			if (zret != kIOReturnSuccess || fTxZlps <= 2) {
+				IOLog("SMSC9514FamilyTransport: DAR-465 ZLP #%u after a %u-byte "
+				    "bulk OUT (max packet %u): %#x\n", fTxZlps, len, mps, zret);
+			}
+			ret = zret;
 		}
 	}
 	IOLockUnlock(fTxLock);

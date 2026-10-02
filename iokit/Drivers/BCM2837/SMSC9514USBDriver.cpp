@@ -320,7 +320,7 @@ SMSC9514FamilyTransport::bulkOut(const void *buf, uint32_t len)
 		UInt16 mps = fBulkOut->GetMaxPacketSize();
 		if (mps != 0 && (len % mps) == 0) {
 			IOReturn zret = fBulkOut->Write(fTxMD, kTxNoDataTimeoutMS,
-			    kTxCompletionTimeoutMS, 0);
+			    kTxCompletionTimeoutMS, (IOByteCount)0);
 			fTxZlps++;
 			if (zret != kIOReturnSuccess || fTxZlps <= 2) {
 				IOLog("SMSC9514FamilyTransport: DAR-465 ZLP #%u after a %u-byte "

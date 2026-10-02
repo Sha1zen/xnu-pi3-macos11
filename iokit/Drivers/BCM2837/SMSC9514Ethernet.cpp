@@ -39,6 +39,8 @@ SMSC9514Ethernet::init(OSDictionary *properties, SMSCUSBTransport *transport)
 	fTxFailStreak = 0;
 	fTxRecoveries = 0;
 	fLastChipRecovery = 0;
+	fChipRecoveryBackoffS = 0;
+	fAppliedDuplex = -1;
 	fPromiscOn = false;
 	fMulticastOn = false;
 	bzero(fMediumTable, sizeof(fMediumTable));
@@ -397,6 +399,7 @@ SMSC9514Ethernet::updateLinkStatus(void)
 			fLinkUp = false;
 			setLinkStatus(kIONetworkLinkValid, NULL);
 		}
+		fAppliedDuplex = -1;   // re-applied on the next link-up
 		return;
 	}
 
@@ -406,7 +409,7 @@ SMSC9514Ethernet::updateLinkStatus(void)
 	// in the intersection (100Full > 100Half > 10Full > 10Half). Falls
 	// back to Auto/unknown-duplex if for any reason the intersection is
 	// empty (e.g. a partner that doesn't auto-negotiate at all).
-	uint16_t anar, anlpar;
+	uint16_t anar = 0, anlpar = 0;
 	UInt32   mediumIndex = kMediumIndexAuto;
 	UInt64   speed = 0;
 	if (mdioRead(kMiiPhyAddr, kMiiAnar, &anar) &&
@@ -427,9 +430,90 @@ SMSC9514Ethernet::updateLinkStatus(void)
 		}
 	}
 
+	// DAR-465: the MAC has to be told the duplex the PHY negotiated. This
+	// driver never did, so MAC_CR's FDPX stayed at its reset value
+	// (half duplex) behind a PHY negotiating 100Full. Only when the
+	// duplex is known; an unresolved (Auto) medium leaves MAC_CR alone.
+	if (mediumIndex != kMediumIndexAuto) {
+		bool full = (mediumIndex == kMediumIndex100FullDuplex ||
+		    mediumIndex == kMediumIndex10FullDuplex);
+		if (fAppliedDuplex != (full ? 1 : 0)) {
+			applyDuplex(full, anar, anlpar);
+		}
+	}
+
 	fLinkUp = true;
 	setLinkStatus(kIONetworkLinkValid | kIONetworkLinkActive,
 	    fMediumTable[mediumIndex], speed);
+}
+
+/*
+ * DAR-465. Linux smsc95xx_mac_update_fullduplex()
+ * (drivers/net/usb/smsc95xx.c:576-603, v6.6): full duplex sets
+ * MAC_CR_FDPX_ and clears MAC_CR_RCVOWN_, half duplex the reverse, then
+ * smsc95xx_phy_update_flowcontrol() (:538-574):
+ *   full duplex: FLOW = 0xFFFF0002 if RX pause is resolved, |= 0xFFFF0000
+ *                if TX pause; AFC_CFG |= 0xF with TX pause, &= ~0xF
+ *                without;
+ *   half duplex: FLOW = 0, AFC_CFG |= 0xF (back-pressure).
+ * Pause is resolved as phy_get_pause() does (drivers/net/phy/
+ * phy_device.c:2876-2887): none unless full duplex, else
+ * linkmode_resolve_pause() (drivers/net/phy/linkmode.c:24-43) on our
+ * advertisement and the partner's.
+ *
+ * MAC_CR is read-modify-written, touching only FDPX and RCVOWN, so
+ * TXEN/RXEN/PRMS/MCPAS and everything else keep what resetChip() and the
+ * filter calls set. Runs on this driver's workloop (the link timer, or
+ * enable()), as every other MAC_CR writer does.
+ */
+void
+SMSC9514Ethernet::applyDuplex(bool fullDuplex, uint16_t anar, uint16_t anlpar)
+{
+	bool txPause = false, rxPause = false;
+	if (fullDuplex) {
+		uint16_t common = anar & anlpar;
+		if (common & kAnarPause) {
+			txPause = rxPause = true;
+		} else if (common & kAnarPauseAsym) {
+			txPause = (anlpar & kAnarPause) != 0;
+			rxPause = (anar & kAnarPause) != 0;
+		}
+	}
+
+	uint32_t macCr = 0, afcCfg = 0;
+	if (!fTransport->readRegister(kRegMacCr, &macCr) ||
+	    !fTransport->readRegister(kRegAfcCfg, &afcCfg)) {
+		IOLog("SMSC9514Ethernet: DAR-465 duplex update: register read failed\n");
+		return;   // fAppliedDuplex unchanged: retried on the next link poll
+	}
+	if (fullDuplex) {
+		macCr = (macCr & ~(uint32_t)kMacCrRcvOwn) | kMacCrFdpx;
+	} else {
+		macCr = (macCr & ~(uint32_t)kMacCrFdpx) | kMacCrRcvOwn;
+	}
+	uint32_t flow = 0;
+	if (fullDuplex) {
+		if (rxPause) {
+			flow = 0xFFFF0002;
+		}
+		if (txPause) {
+			afcCfg |= 0xF;
+			flow |= 0xFFFF0000;
+		} else {
+			afcCfg &= ~0xFU;
+		}
+	} else {
+		afcCfg |= 0xF;
+	}
+	bool ok = fTransport->writeRegister(kRegMacCr, macCr) &&
+	    fTransport->writeRegister(kRegFlow, flow) &&
+	    fTransport->writeRegister(kRegAfcCfg, afcCfg);
+	IOLog("SMSC9514Ethernet: DAR-465 link %s duplex: MAC_CR=%#x FLOW=%#x AFC_CFG=%#x "
+	    "(tx pause %u, rx pause %u)%s\n", fullDuplex ? "full" : "half", macCr, flow,
+	    afcCfg, txPause, rxPause, ok ? "" : " - register write FAILED");
+	if (ok) {
+		fAppliedDuplex = fullDuplex ? 1 : 0;
+	}
 }
 
 void
@@ -871,9 +955,11 @@ SMSC9514Ethernet::outputPacket(mbuf_t m, void * /*param*/)
 	 * Escalate instead of failing every frame from now on:
 	 *   1. restart the chip's TX path (TX_CFG stop, FIFO flush, clear the
 	 *      INT_STS TX error bits, TX_CFG on) and retry this frame - on the
-	 *      first failure of a streak and every 8th after it;
+	 *      first four failures of a streak and every 8th after that;
 	 *   2. after 32 consecutive failures, a full chip re-init
-	 *      (recoverChip()), at most once per 5 s.
+	 *      (recoverChip()), first after 5 s, then backing off 10, 20, 40,
+	 *      60 s (capped) while the streak lasts, so a permanently dead
+	 *      link does not flap and log forever.
 	 * Bounded and sampled-logged, so a dead device costs a few register
 	 * accesses per frame, not a console flood.
 	 */
@@ -883,13 +969,21 @@ SMSC9514Ethernet::outputPacket(mbuf_t m, void * /*param*/)
 		if (fTxFailStreak >= 32) {
 			uint64_t now = mach_absolute_time();
 			uint64_t gap;
-			nanoseconds_to_absolutetime(5ULL * NSEC_PER_SEC, &gap);
+			if (fChipRecoveryBackoffS == 0) {
+				fChipRecoveryBackoffS = 5;
+			}
+			nanoseconds_to_absolutetime((uint64_t)fChipRecoveryBackoffS * NSEC_PER_SEC, &gap);
 			if (fLastChipRecovery == 0 || now - fLastChipRecovery >= gap) {
+				if (fLastChipRecovery != 0) {
+					// This is a repeat within one failure streak.
+					fChipRecoveryBackoffS = (fChipRecoveryBackoffS >= 30) ? 60 :
+					    fChipRecoveryBackoffS * 2;
+				}
 				fLastChipRecovery = now;
 				recoverChip();
 				retried = true;
 			}
-		} else if (fTxFailStreak == 1 || (fTxFailStreak % 8) == 0) {
+		} else if (fTxFailStreak <= 4 || (fTxFailStreak % 8) == 0) {
 			recoverTxPath();
 			retried = true;
 		}
@@ -901,6 +995,8 @@ SMSC9514Ethernet::outputPacket(mbuf_t m, void * /*param*/)
 		IOLog("SMSC9514Ethernet: DAR-465 TX recovered after %u failed send(s)\n",
 		    fTxFailStreak);
 		fTxFailStreak = 0;
+		fLastChipRecovery = 0;
+		fChipRecoveryBackoffS = 0;
 	}
 
 	IOFree(buf, bufSize);
@@ -913,12 +1009,17 @@ SMSC9514Ethernet::outputPacket(mbuf_t m, void * /*param*/)
  * DAR-465. Restart the LAN9514's transmit path. Register bits are Linux's
  * (drivers/net/usb/smsc95xx.h at v6.6: TX_CFG_STOP_/TX_CFG_FIFO_FLUSH_/
  * TX_CFG_ON_ :68-71, INT_STS_TX_STOP_/TXE_/TDFU_/TDFO_ :51-58, HW_CFG_SBP_
- * :78 "Stall Bulk Out Pipe Dis."). HW_CFG_SBP_ is the evidence that the
- * chip STALLs its bulk OUT pipe on a TX error unless told not to; this
- * driver (like Linux) leaves it clear. The STOP -> FIFO flush -> clear
- * INT_STS -> ON order is this driver's own, not taken from a reference
- * driver: Linux never restarts the TX path at runtime, it only clears the
- * halt (usbnet EVENT_TX_HALT). The first registers are read and logged
+ * :78 "Stall Bulk Out Pipe Dis."). HW_CFG_SBP_'s name says the chip
+ * stalls its bulk OUT pipe unless told not to; that it does so on a TX
+ * error (INT_STS_TXE_) is INFERRED from the register names, not read in
+ * a datasheet. This driver (like Linux) leaves SBP clear. That the chip then keeps STALLing
+ * after CLEAR_FEATURE until its TX path is restarted is INFERRED (the
+ * real Pi log, docs/dar-465-ethernet-stall.md), not from a datasheet.
+ * The STOP -> FIFO flush -> clear INT_STS -> ON order is this driver's
+ * own, not taken from a reference driver: Linux only turns TX on at
+ * start (smsc95xx_start_tx_path(), smsc95xx.c:850-864) and on a bulk OUT
+ * -EPIPE only clears the halt (usbnet.c:1262 defers EVENT_TX_HALT, and
+ * :1141-1160 runs usb_clear_halt()). The registers are read and logged
  * before anything is written, so the next real-hardware capture shows
  * whether TXE (INT_STS bit 14) was set, i.e. whether the device really
  * was in a TX-error state.
@@ -929,19 +1030,21 @@ SMSC9514Ethernet::recoverTxPath(void)
 	if (fTransport == NULL) {
 		return false;
 	}
-	uint32_t intSts = 0, txCfg = 0, hwCfg = 0;
+	uint32_t intSts = 0, txCfg = 0, hwCfg = 0, macCr = 0;
 	bool readOK = fTransport->readRegister(kRegIntSts, &intSts) &&
 	    fTransport->readRegister(kRegTxCfg, &txCfg) &&
-	    fTransport->readRegister(kRegHwCfg, &hwCfg);
+	    fTransport->readRegister(kRegHwCfg, &hwCfg) &&
+	    fTransport->readRegister(kRegMacCr, &macCr);
 	fTxRecoveries++;
 	bool log = (fTxRecoveries <= 4 || (fTxRecoveries & (fTxRecoveries - 1)) == 0);
 	if (log) {
 		IOLog("SMSC9514Ethernet: DAR-465 TX recovery #%u (streak %u): %s INT_STS=%#x "
-		    "(TXE %u TDFU %u TDFO %u TX_STOP %u) TX_CFG=%#x HW_CFG=%#x (SBP %u)\n",
+		    "(TXE %u TDFU %u TDFO %u TX_STOP %u) TX_CFG=%#x HW_CFG=%#x (SBP %u) "
+		    "MAC_CR=%#x (FDPX %u)\n",
 		    fTxRecoveries, fTxFailStreak, readOK ? "" : "[register read FAILED]",
 		    intSts, !!(intSts & kIntStsTxe), !!(intSts & kIntStsTdfu),
 		    !!(intSts & kIntStsTdfo), !!(intSts & kIntStsTxStop), txCfg, hwCfg,
-		    !!(hwCfg & kHwCfgSbp));
+		    !!(hwCfg & kHwCfgSbp), macCr, !!(macCr & kMacCrFdpx));
 	}
 	if (!readOK) {
 		return false;
@@ -993,8 +1096,10 @@ bool
 SMSC9514Ethernet::recoverChip(void)
 {
 	IOLog("SMSC9514Ethernet: DAR-465 %u consecutive failed sends - re-initialising "
-	    "the chip\n", fTxFailStreak);
+	    "the chip (next attempt no sooner than %u s)\n", fTxFailStreak,
+	    fChipRecoveryBackoffS);
 	bool ok = resetChip() && programMACAddress(&fMACAddress);
+	fAppliedDuplex = -1;   // the lite reset cleared MAC_CR's duplex bits
 	if (ok && fMulticastOn) {
 		ok = (setMulticastMode(true) == kIOReturnSuccess);
 	}

@@ -74,6 +74,8 @@ iokit/Drivers/BCM2837/SMSC9514USBDriver.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Mailbox.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837VC4.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837VC4Framebuffer.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/VC4V3DEngine.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837VC4UserClient.cpp		optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp
 

@@ -57,9 +57,10 @@ public:
 	uint32_t fSize;
 	uint32_t fGpuAddr;       /* bus address the GPU uses */
 	volatile uint64_t fBusySeqno;  /* highest seqno of a job using this BO */
+	volatile uint64_t fWriteSeqno; /* seqno of the last job whose render stage wrote this BO */
 	struct vc4_validated_shader_info *fShader;   /* non-NULL: a validated, immutable shader BO */
 
-	static V3DBuffer *withSize(uint32_t size);
+	static V3DBuffer *withSize(uint32_t size, bool binner = false);
 	virtual void free(void) APPLE_KEXT_OVERRIDE;
 };
 
@@ -112,7 +113,7 @@ private:
 	void saveHangState(void);
 	void queueHangcheck(void);
 	void freeJob(V3DJob *j);
-	IOReturn queueJob(V3DJob *j, uint64_t *seqnoOut);
+	IOReturn queueJob(V3DJob *j, uint64_t *seqnoOut, V3DBuffer *const *writes = NULL, uint32_t nWrites = 0);
 	void resetBinnerOverflow(void);   // job lock held, binner idle
 
 	static const uint32_t kPMPassword = 0x5a000000U;

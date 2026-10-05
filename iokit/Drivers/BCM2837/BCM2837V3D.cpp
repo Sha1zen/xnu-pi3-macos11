@@ -89,7 +89,7 @@ v3d_bug_on(const char *file, int line)
 /* ============================ V3DBuffer ============================ */
 
 V3DBuffer *
-V3DBuffer::withSize(uint32_t size)
+V3DBuffer::withSize(uint32_t size, bool binner)
 {
 	if (size == 0 || size > kMaxBOSize) {
 		return NULL;
@@ -111,17 +111,27 @@ V3DBuffer::withSize(uint32_t size)
 	// And not crossing a 256 MiB boundary: vc4_v3d_allocate_bin_bo()
 	// (vc4_v3d.c:247-273) retries until the binner's memory "won't trigger
 	// the addressing bug" ((addr & 0xf0000000) == ((addr + size - 1) &
-	// 0xf0000000)). Binner memory here is the overflow pool and each job's
-	// tile alloc/state BO (allocated through allocJobBO), so every BO gets
-	// the rule. Like Linux, failed candidates are held until one fits so the
-	// next attempt cannot return the same memory.
+	// 0xf0000000)). Every BO gets that rule; like Linux, failed candidates
+	// are held until one fits so the next attempt cannot return the same
+	// memory.
+	//
+	// Binner memory (`binner`: the overflow pool and each job's tile
+	// alloc/state BO) needs more: the binner takes the top 4 bits of tile
+	// alloc and overflow addresses from the tile state array's address
+	// (Linux 553c942f8b2c, "the hardware addressing bug between the tile
+	// binner and the tile alloc memory (where the top 4 bits come from the
+	// tile state data array's address)"). Linux keeps all of it in one BO;
+	// here it is several BOs, so all of them are confined to the same
+	// window, the first 256 MiB (mask 0x0FFFF000) -- what Linux did before
+	// that commit by limiting CMA to 256 MiB.
+	const uint64_t mask = binner ? 0x0FFFF000ULL : 0x3FFFF000ULL;
 	{
 		IOBufferMemoryDescriptor *rejected[8];
 		uint32_t nRejected = 0;
 		for (;;) {
 			IOBufferMemoryDescriptor *m = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
 			    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
-			    size, 0x3FFFF000ULL);
+			    size, mask);
 			if (m == NULL) {
 				break;
 			}
@@ -165,6 +175,7 @@ V3DBuffer::withSize(uint32_t size)
 	}
 	b->fGpuAddr = (uint32_t)pa + kV3D_BusAliasBase;
 	b->fBusySeqno = 0;
+	b->fWriteSeqno = 0;
 	return b;
 }
 
@@ -664,7 +675,7 @@ BCM2837V3D::submitRaw(const v3d_raw_submit *in, V3DBuffer **bos, uint64_t *seqno
  * it can complete, and be reaped, at any time.
  */
 IOReturn
-BCM2837V3D::queueJob(V3DJob *j, uint64_t *seqnoOut)
+BCM2837V3D::queueJob(V3DJob *j, uint64_t *seqnoOut, V3DBuffer *const *writes, uint32_t nWrites)
 {
 	if (!fPowered || fStopping) {
 		freeJob(j);
@@ -680,6 +691,9 @@ BCM2837V3D::queueJob(V3DJob *j, uint64_t *seqnoOut)
 	uint64_t seqno = fQueue->submit(j);
 	for (uint32_t i = 0; i < j->boCount; i++) {
 		j->bos[i]->fBusySeqno = seqno;
+	}
+	for (uint32_t i = 0; i < nWrites; i++) {
+		writes[i]->fWriteSeqno = seqno;
 	}
 	IOSimpleLockUnlockEnableInterrupt(fJobLock, s);
 
@@ -753,7 +767,10 @@ allocJobBO(void *ctxp, size_t size, bool stage, uint32_t *gpu, void **staging)
 	if (ctx->n >= 8 || size == 0 || size > kMaxBOSize) {
 		return ENOMEM;
 	}
-	V3DBuffer *b = V3DBuffer::withSize((uint32_t)size);
+	// The validators allocate exactly one BO without a staging copy: the
+	// tile alloc/state BO (vc4_validate.c, drm_gem_cma_create_nostage()).
+	// That is binner memory and must share the overflow pool's window.
+	V3DBuffer *b = V3DBuffer::withSize((uint32_t)size, !stage);
 	if (b == NULL) {
 		return ENOMEM;
 	}
@@ -826,6 +843,30 @@ BCM2837V3D::submitValidated(v3d_submit_cl *args, V3DBuffer **bos, uint32_t boCou
 		goto fail;
 	}
 
+	// Bin dependency (Linux 7edabee06a56, vc4_gem.c:905-911): with bin and
+	// render pipelined, this job's binning can start while an earlier job's
+	// render is still writing a BO this job reads (VBO, IB, coordinate-
+	// shader textures), and bin from stale memory. Linux tracks exactly
+	// those reads (exec->bin_dep_seqno); the vendored validators predate
+	// that, so this waits on the superset: every BO of the job that an
+	// earlier render wrote. Correct, at the cost of not overlapping a job
+	// with an earlier render of a BO it also renders to.
+	{
+		uint64_t dep = 0;
+		for (uint32_t i = 0; i < boCount; i++) {
+			if (bos[i]->fWriteSeqno > dep) {
+				dep = bos[i]->fWriteSeqno;
+			}
+		}
+		if (dep != 0) {
+			IOReturn w = waitSeqno(dep, 10ULL * 1000 * 1000 * 1000);
+			if (w != kIOReturnSuccess) {
+				ret = w;
+				goto fail;
+			}
+		}
+	}
+
 	// Validation succeeded: publish the finished images to the GPU memory.
 	for (uint32_t i = 0; i < ctx.n; i++) {
 		if (ctx.list[i].staging != NULL) {
@@ -864,7 +905,21 @@ BCM2837V3D::submitValidated(v3d_submit_cl *args, V3DBuffer **bos, uint32_t boCou
 	if (descs != NULL) {
 		IOFree(descs, boCount * sizeof(v3d_kbo_desc));
 	}
-	return queueJob(j, seqnoOut);
+	{
+		// The render stage's surface writes (vc4_render_cl.c: color_write,
+		// zs_write, msaa_color_write, msaa_zs_write); the validators have
+		// already checked these indices against the BO list.
+		V3DBuffer *writes[4];
+		uint32_t nWrites = 0;
+		const uint32_t idx[4] = { args->color_write.hindex, args->zs_write.hindex,
+		    args->msaa_color_write.hindex, args->msaa_zs_write.hindex };
+		for (uint32_t k = 0; k < 4; k++) {
+			if (idx[k] < boCount) {
+				writes[nWrites++] = bos[idx[k]];
+			}
+		}
+		return queueJob(j, seqnoOut, writes, nWrites);
+	}
 
 fail:
 	for (uint32_t i = 0; i < ctx.n; i++) {
@@ -980,7 +1035,7 @@ BCM2837V3D::start(IOService *provider)
 	if (fQueue == NULL) {
 		return false;
 	}
-	fOverflowBO = V3DBuffer::withSize(4U * 1024 * 1024);
+	fOverflowBO = V3DBuffer::withSize(4U * 1024 * 1024, true);
 	if (fOverflowBO == NULL) {
 		IOLog("BCM2837V3D: no memory for binner overflow\n");
 		return false;

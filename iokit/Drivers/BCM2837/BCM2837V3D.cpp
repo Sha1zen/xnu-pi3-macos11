@@ -187,6 +187,19 @@ BCM2837V3D::powerOn(void)
 {
 	IOLog("BCM2837V3D: PM_GRAFX at entry %#x (PM_IMAGE %#x)\n", pmRead(kPM_GRAFX), pmRead(0x108));
 	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
+		// Real-hardware experiment (first Pi 3 boot: GRAFX off at entry and
+		// POWOK never rose at any inrush step, PM_GRAFX 0x1000 -> 0x1001).
+		// Ask the firmware for the V3D clock first: the VPU owns V3D power
+		// on firmware-booted boards and may power GRAFX when the clock is
+		// requested.
+		uint32_t hz = 0;
+		bool gotRate = BCM2837Mailbox::getClockRateHz(BCM2837Mailbox::kClockIdV3D, &hz);
+		bool clkOn = BCM2837Mailbox::setClockState(BCM2837Mailbox::kClockIdV3D, true);
+		IODelay(2000);
+		IOLog("BCM2837V3D: V3D clock rate %s %u Hz, enable %s, PM_GRAFX now %#x\n",
+		    gotRate ? "reads" : "unreadable", hz, clkOn ? "ok" : "refused", pmRead(kPM_GRAFX));
+	}
+	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
 		// Firmware did not leave GRAFX powered. Ramp the inrush current up
 		// until POWOK sets (:236-254; Linux loops all four values without a
 		// break, here the first success ends the ramp).
@@ -194,7 +207,7 @@ BCM2837V3D::powerOn(void)
 		for (uint32_t inrush = 0; inrush <= 3 && !powok; inrush++) {
 			pmWrite(kPM_GRAFX, (pmRead(kPM_GRAFX) & ~kPM_InrushMask) |
 			    (inrush << kPM_InrushShift) | kPM_POWUP);
-			for (int i = 0; i < 100; i++) {
+			for (int i = 0; i < 10000; i++) {
 				if (pmRead(kPM_GRAFX) & kPM_POWOK) {
 					powok = true;
 					break;

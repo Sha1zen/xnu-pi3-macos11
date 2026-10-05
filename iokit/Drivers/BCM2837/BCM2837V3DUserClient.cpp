@@ -322,9 +322,9 @@ BCM2837V3DUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options, IO
 		b->release();
 		return kIOReturnNotPermitted;
 	}
-	// The descriptor already carries the write-combine cache mode it was
-	// allocated with; don't override it.
-	*options = 0;
+	// The descriptor itself is cacheable (see V3DBuffer::withSize); the
+	// client's mapping is the write-combined one the GPU-visible BO needs.
+	*options = kIOMapWriteCombineCache;
 	b->fMem->retain();
 	*memory = b->fMem;
 	b->release();

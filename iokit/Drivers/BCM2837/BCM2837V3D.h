@@ -54,6 +54,8 @@ class V3DBuffer : public OSObject {
 	OSDeclareFinalStructors(V3DBuffer)
 public:
 	IOBufferMemoryDescriptor *fMem;
+	IOMemoryMap *fKernMap;   /* write-combined kernel mapping of fMem */
+	volatile void *fKva;     /* its address: the only kernel pointer to the BO's contents */
 	uint32_t fSize;
 	uint32_t fGpuAddr;       /* bus address the GPU uses */
 	volatile uint64_t fBusySeqno;  /* highest seqno of a job using this BO */

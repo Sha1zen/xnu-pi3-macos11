@@ -104,36 +104,29 @@ V3DBuffer::withSize(uint32_t size)
 		b->release();
 		return NULL;
 	}
-	// Physically contiguous (the GPU has no MMU) and below the 0x3f000000
-	// VideoCore bus-alias window. Mask 0x3FFFF000: page-aligned addresses up
-	// to 1 GiB, inside the dma-ranges window.
-	//
-	// The descriptor is allocated CACHEABLE on purpose: IOBufferMemoryDescriptor
-	// zeroes the buffer itself with bzero() (xnu IOBufferMemoryDescriptor.cpp:331),
-	// and bzero() uses DC ZVA for large sizes. On a write-combined (Normal
-	// non-cacheable) mapping that intermittently stalled the guest forever in
-	// the ZVA loop under QEMU (PC and registers fixed across samples). So the
-	// zeroing happens on a cacheable mapping, the lines are then cleaned and
-	// invalidated, and the BO is mapped write-combined separately.
+	// Physically contiguous (the GPU has no MMU), write-combined, and below
+	// the 0x3f000000 VideoCore bus-alias window. Mask 0x3FFFF000: page-
+	// aligned addresses up to 1 GiB, inside the dma-ranges window.
 	b->fMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-	    kIODirectionInOut | kIOMemoryPhysicallyContiguous,
+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
 	    size, 0x3FFFF000ULL);
 	if (b->fMem == NULL) {
 		b->release();
 		return NULL;
 	}
 	b->fSize = size;
-	if (b->fMem->performOperation(kIOMemoryIncoherentIOFlush, 0, size) != kIOReturnSuccess) {
-		b->release();
-		return NULL;
+	// Never hand a client someone else's stale memory. Plain stores, not
+	// bzero(): bzero zeroes large buffers with DC ZVA, and this mapping is
+	// write-combined (Normal non-cacheable). Under QEMU a bzero of a fresh
+	// 16 KiB BO intermittently spun forever in that DC ZVA loop (caught with
+	// the monitor sampling: PC fixed in _bzero, 2 runs in 5); the explicit
+	// loop never does.
+	{
+		volatile uint64_t *w = (volatile uint64_t *)b->fMem->getBytesNoCopy();
+		for (uint32_t i = 0; i < size / 8; i++) {
+			w[i] = 0;
+		}
 	}
-	b->fKernMap = b->fMem->createMappingInTask(kernel_task, 0,
-	    kIOMapAnywhere | kIOMapWriteCombineCache);
-	if (b->fKernMap == NULL) {
-		b->release();
-		return NULL;
-	}
-	b->fKva = (volatile void *)b->fKernMap->getVirtualAddress();
 	cpuToGpuBarrier();
 
 	IOPhysicalAddress pa = b->fMem->getPhysicalAddress();
@@ -153,10 +146,6 @@ V3DBuffer::free(void)
 	if (fShader != NULL) {
 		v3d_kglue_free_shader(fShader);
 		fShader = NULL;
-	}
-	if (fKernMap != NULL) {
-		fKernMap->release();
-		fKernMap = NULL;
 	}
 	if (fMem != NULL) {
 		fMem->release();
@@ -676,7 +665,7 @@ allocJobBO(void *ctxp, size_t size, bool stage, uint32_t *gpu, void **staging)
 static void
 copyStagingToBO(V3DBuffer *b, const void *src, size_t n)
 {
-	volatile uint32_t *d = (volatile uint32_t *)b->fKva;
+	volatile uint32_t *d = (volatile uint32_t *)b->fMem->getBytesNoCopy();
 	const uint32_t *s = (const uint32_t *)src;
 	for (size_t i = 0; i < (n + 3) / 4; i++) {
 		d[i] = s[i];

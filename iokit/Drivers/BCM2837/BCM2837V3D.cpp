@@ -185,6 +185,7 @@ BCM2837V3D::asbControl(uint32_t reg, bool enable)
 bool
 BCM2837V3D::powerOn(void)
 {
+	IOLog("BCM2837V3D: PM_GRAFX at entry %#x (PM_IMAGE %#x)\n", pmRead(kPM_GRAFX), pmRead(0x108));
 	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
 		// Firmware did not leave GRAFX powered. Ramp the inrush current up
 		// until POWOK sets (:236-254; Linux loops all four values without a
@@ -200,6 +201,7 @@ BCM2837V3D::powerOn(void)
 				}
 				IODelay(1);
 			}
+			IOLog("BCM2837V3D: GRAFX inrush %u -> PM_GRAFX %#x\n", inrush, pmRead(kPM_GRAFX));
 		}
 		if (!powok) {
 			IOLog("BCM2837V3D: GRAFX power never reported POWOK\n");

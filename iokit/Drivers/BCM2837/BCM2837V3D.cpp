@@ -107,20 +107,48 @@ V3DBuffer::withSize(uint32_t size)
 	// Physically contiguous (the GPU has no MMU), write-combined, and below
 	// the 0x3f000000 VideoCore bus-alias window. Mask 0x3FFFF000: page-
 	// aligned addresses up to 1 GiB, inside the dma-ranges window.
-	b->fMem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-	    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
-	    size, 0x3FFFF000ULL);
+	//
+	// And not crossing a 256 MiB boundary: vc4_v3d_allocate_bin_bo()
+	// (vc4_v3d.c:247-273) retries until the binner's memory "won't trigger
+	// the addressing bug" ((addr & 0xf0000000) == ((addr + size - 1) &
+	// 0xf0000000)). Binner memory here is the overflow pool and each job's
+	// tile alloc/state BO (allocated through allocJobBO), so every BO gets
+	// the rule. Like Linux, failed candidates are held until one fits so the
+	// next attempt cannot return the same memory.
+	{
+		IOBufferMemoryDescriptor *rejected[8];
+		uint32_t nRejected = 0;
+		for (;;) {
+			IOBufferMemoryDescriptor *m = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+			    kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache,
+			    size, 0x3FFFF000ULL);
+			if (m == NULL) {
+				break;
+			}
+			uint64_t pa0 = m->getPhysicalAddress();
+			if ((pa0 & 0xf0000000ULL) == ((pa0 + size - 1) & 0xf0000000ULL)) {
+				b->fMem = m;
+				break;
+			}
+			if (nRejected == sizeof(rejected) / sizeof(rejected[0])) {
+				m->release();
+				break;
+			}
+			rejected[nRejected++] = m;
+		}
+		while (nRejected > 0) {
+			rejected[--nRejected]->release();
+		}
+	}
 	if (b->fMem == NULL) {
 		b->release();
 		return NULL;
 	}
 	b->fSize = size;
-	// Never hand a client someone else's stale memory. Plain stores, not
-	// bzero(): bzero zeroes large buffers with DC ZVA, and this mapping is
-	// write-combined (Normal non-cacheable). Under QEMU a bzero of a fresh
-	// 16 KiB BO intermittently spun forever in that DC ZVA loop (caught with
-	// the monitor sampling: PC fixed in _bzero, 2 runs in 5); the explicit
-	// loop never does.
+	// Never hand a client someone else's stale memory. Note this does NOT
+	// avoid the QEMU-only DC ZVA stall seen in testing: that stall is in
+	// IOBufferMemoryDescriptor's own bzero() (IOBufferMemoryDescriptor.cpp:331)
+	// during allocation, before this loop runs (docs/gpu-opengl-plan.md).
 	{
 		volatile uint64_t *w = (volatile uint64_t *)b->fMem->getBytesNoCopy();
 		for (uint32_t i = 0; i < size / 8; i++) {
@@ -177,41 +205,103 @@ BCM2837V3D::asbControl(uint32_t reg, bool enable)
 }
 
 /*
- * The V3D power-on path of Linux's bcm2835_power_pd_power_on() for
- * BCM2835_POWER_DOMAIN_GRAFX_V3D (bcm2835-power.c:366-380), preceded by the
- * GRAFX domain's own bcm2835_power_power_on(PM_GRAFX) (:214-275) which
- * Linux runs because the V3D domain's parent is GRAFX.
+ * Who powers the V3D.
+ *
+ * On a board running the Raspberry Pi firmware the VideoCore owns the PM
+ * block, and Linux never touches PM_GRAFX or the ASB bridges: every Pi DT
+ * (bcm2837-rpi-3-b.dts -> bcm2836-rpi.dtsi -> bcm2835-rpi-common.dtsi:23-25,
+ * and the downstream bcm270x.dtsi:140-144) gives the v3d node
+ * `power-domains = <&power RPI_POWER_DOMAIN_V3D>`, served by
+ * drivers/pmdomain/bcm/raspberrypi-power.c, which asks the firmware with
+ * RPI_FIRMWARE_SET_DOMAIN_STATE. The PM-block sequence (bcm2835-power.c) is
+ * only for boards without that firmware. Found on the first real Pi 3 boot:
+ * with the PM-block sequence GRAFX took POWUP but POWOK never rose
+ * (PM_GRAFX 0x1000 -> 0x1001 at every inrush step, also after a 10 ms wait
+ * and with the firmware's V3D clock on).
+ *
+ * The firmware path is used when the firmware has the domain interface;
+ * otherwise (no Raspberry Pi firmware, e.g. the QEMU V3D model) the
+ * PM-block path.
  */
+enum {
+	kTagGetDomainState = 0x00030030,   // RPI_FIRMWARE_GET_DOMAIN_STATE
+	kTagSetDomainState = 0x00038030,   // RPI_FIRMWARE_SET_DOMAIN_STATE
+	// RPI_POWER_DOMAIN_V3D is 10 in dt-bindings/power/raspberrypi-power.h,
+	// and the firmware's index is that plus one (raspberrypi-power.c:112-113,
+	// "The DT binding index is the firmware's domain index minus one").
+	kFwDomainV3D = 10 + 1,
+	kRpiPowerDomainARM = 22,           // RPI_POWER_DOMAIN_ARM, used as-is by the probe
+};
+
+/*
+ * rpi_has_new_domain_support() (raspberrypi-power.c:130-152): the firmware
+ * does not fail an unknown tag, it skips it, so put ~0 in the answer word
+ * and see whether the firmware overwrote it.
+ */
+static bool
+firmwareHasDomainInterface(void)
+{
+	uint32_t resp = 0, a = 0, b = 0;
+	if (!BCM2837Mailbox::propertyTag2(kTagGetDomainState, kRpiPowerDomainARM, ~0U, &resp, &a, &b)) {
+		return false;
+	}
+	return b != ~0U;
+}
+
+/* rpi_firmware_set_power() (raspberrypi-power.c:51-62), new interface. */
+static bool
+firmwareSetV3DPower(bool on)
+{
+	uint32_t resp = 0, a = 0, b = 0;
+	if (!BCM2837Mailbox::propertyTag2(kTagSetDomainState, kFwDomainV3D, on ? 1 : 0, &resp, &a, &b)) {
+		return false;
+	}
+	return (resp & 0x80000000U) != 0;
+}
+
 bool
 BCM2837V3D::powerOn(void)
 {
-	IOLog("BCM2837V3D: PM_GRAFX at entry %#x (PM_IMAGE %#x)\n", pmRead(kPM_GRAFX), pmRead(0x108));
-	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
-		// Real-hardware experiment (first Pi 3 boot: GRAFX off at entry and
-		// POWOK never rose at any inrush step, PM_GRAFX 0x1000 -> 0x1001).
-		// Ask the firmware for the V3D clock first: the VPU owns V3D power
-		// on firmware-booted boards and may power GRAFX when the clock is
-		// requested.
-		uint32_t hz = 0;
-		bool gotRate = BCM2837Mailbox::getClockRateHz(BCM2837Mailbox::kClockIdV3D, &hz);
-		bool clkOn = BCM2837Mailbox::setClockState(BCM2837Mailbox::kClockIdV3D, true);
-		IODelay(2000);
-		IOLog("BCM2837V3D: V3D clock rate %s %u Hz, enable %s, PM_GRAFX now %#x\n",
-		    gotRate ? "reads" : "unreadable", hz, clkOn ? "ok" : "refused", pmRead(kPM_GRAFX));
-		// Firmware power domain RPI_POWER_DOMAIN_V3D = 10
-		// (include/dt-bindings/power/raspberrypi-power.h), tags
-		// GET/SET_DOMAIN_STATE 0x00030030 / 0x00038030
-		// (include/soc/bcm2835/raspberrypi-firmware.h).
-		uint32_t resp = 0, da = 0, db = 0;
-		bool g = BCM2837Mailbox::propertyTag2(0x00030030, 10, 0, &resp, &da, &db);
-		IOLog("BCM2837V3D: firmware V3D domain get: call %s resp %#x dom %u state %#x\n",
-		    g ? "ok" : "failed", resp, da, db);
-		resp = da = db = 0;
-		g = BCM2837Mailbox::propertyTag2(0x00038030, 10, 1, &resp, &da, &db);
-		IODelay(5000);
-		IOLog("BCM2837V3D: firmware V3D domain set on: call %s resp %#x dom %u state %#x, PM_GRAFX now %#x\n",
-		    g ? "ok" : "failed", resp, da, db, pmRead(kPM_GRAFX));
+	if (fFwPowerChecked == false) {
+		fFwPower = firmwareHasDomainInterface();
+		fFwPowerChecked = true;
+		IOLog("BCM2837V3D: power through %s\n", fFwPower ?
+		    "the firmware (domain V3D)" : "the PM block (no firmware domain interface)");
 	}
+	if (fFwPower) {
+		if (!firmwareSetV3DPower(true)) {
+			IOLog("BCM2837V3D: firmware would not power the V3D domain\n");
+			return false;
+		}
+		fPowered = true;
+		return true;
+	}
+	return powerOnPM();
+}
+
+void
+BCM2837V3D::powerOff(void)
+{
+	if (fFwPower) {
+		fPowered = false;
+		if (!firmwareSetV3DPower(false)) {
+			IOLog("BCM2837V3D: firmware would not power the V3D domain off\n");
+		}
+		return;
+	}
+	powerOffPM();
+}
+
+/*
+ * Boards without the Raspberry Pi firmware: the V3D power-on path of Linux's
+ * bcm2835_power_pd_power_on() for BCM2835_POWER_DOMAIN_GRAFX_V3D
+ * (bcm2835-power.c:366-380), preceded by the GRAFX domain's own
+ * bcm2835_power_power_on(PM_GRAFX) (:214-275) which Linux runs because the
+ * V3D domain's parent is GRAFX.
+ */
+bool
+BCM2837V3D::powerOnPM(void)
+{
 	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
 		// Firmware did not leave GRAFX powered. Ramp the inrush current up
 		// until POWOK sets (:236-254; Linux loops all four values without a
@@ -220,17 +310,16 @@ BCM2837V3D::powerOn(void)
 		for (uint32_t inrush = 0; inrush <= 3 && !powok; inrush++) {
 			pmWrite(kPM_GRAFX, (pmRead(kPM_GRAFX) & ~kPM_InrushMask) |
 			    (inrush << kPM_InrushShift) | kPM_POWUP);
-			for (int i = 0; i < 10000; i++) {
+			for (int i = 0; i < 100; i++) {
 				if (pmRead(kPM_GRAFX) & kPM_POWOK) {
 					powok = true;
 					break;
 				}
 				IODelay(1);
 			}
-			IOLog("BCM2837V3D: GRAFX inrush %u -> PM_GRAFX %#x\n", inrush, pmRead(kPM_GRAFX));
 		}
 		if (!powok) {
-			IOLog("BCM2837V3D: GRAFX power never reported POWOK\n");
+			IOLog("BCM2837V3D: GRAFX power never reported POWOK (PM_GRAFX %#x)\n", pmRead(kPM_GRAFX));
 			pmWrite(kPM_GRAFX, pmRead(kPM_GRAFX) & ~(kPM_POWUP | kPM_InrushMask));
 			return false;
 		}
@@ -289,7 +378,7 @@ fail_clk:
 
 /* bcm2835_asb_power_off() (:332-358): slave, master, clock, reset. */
 void
-BCM2837V3D::powerOff(void)
+BCM2837V3D::powerOffPM(void)
 {
 	fPowered = false;
 	if (!asbControl(kASB_V3D_S_CTRL, false)) {

@@ -104,6 +104,8 @@ private:
 	bool asbControl(uint32_t reg, bool enable);
 	bool powerOn(void);
 	void powerOff(void);
+	bool powerOnPM(void);
+	void powerOffPM(void);
 	void initHW(void);
 	void resetHW(void);          /* thread context only */
 
@@ -128,6 +130,8 @@ private:
 	V3DBuffer *fOverflowBO;       // binner overflow memory (BPOA/BPOS)
 	uint32_t fIdent0, fIdent1, fIdent2;
 	bool fPowered;
+	bool fFwPower;          /* the firmware owns V3D power (Raspberry Pi firmware) */
+	bool fFwPowerChecked;
 	bool fIRQRegistered;
 	bool fRawAllowed;
 	bool fStopping;

@@ -198,6 +198,19 @@ BCM2837V3D::powerOn(void)
 		IODelay(2000);
 		IOLog("BCM2837V3D: V3D clock rate %s %u Hz, enable %s, PM_GRAFX now %#x\n",
 		    gotRate ? "reads" : "unreadable", hz, clkOn ? "ok" : "refused", pmRead(kPM_GRAFX));
+		// Firmware power domain RPI_POWER_DOMAIN_V3D = 10
+		// (include/dt-bindings/power/raspberrypi-power.h), tags
+		// GET/SET_DOMAIN_STATE 0x00030030 / 0x00038030
+		// (include/soc/bcm2835/raspberrypi-firmware.h).
+		uint32_t resp = 0, da = 0, db = 0;
+		bool g = BCM2837Mailbox::propertyTag2(0x00030030, 10, 0, &resp, &da, &db);
+		IOLog("BCM2837V3D: firmware V3D domain get: call %s resp %#x dom %u state %#x\n",
+		    g ? "ok" : "failed", resp, da, db);
+		resp = da = db = 0;
+		g = BCM2837Mailbox::propertyTag2(0x00038030, 10, 1, &resp, &da, &db);
+		IODelay(5000);
+		IOLog("BCM2837V3D: firmware V3D domain set on: call %s resp %#x dom %u state %#x, PM_GRAFX now %#x\n",
+		    g ? "ok" : "failed", resp, da, db, pmRead(kPM_GRAFX));
 	}
 	if ((pmRead(kPM_GRAFX) & kPM_POWUP) == 0) {
 		// Firmware did not leave GRAFX powered. Ramp the inrush current up

@@ -64,6 +64,7 @@ public:
 	uint32_t fPoolSlot, fPoolSlots;
 
 	static V3DBuffer *withSize(uint32_t size);
+	static V3DBuffer *empty(void);   /* no memory yet: for binner-pool slices */
 	virtual void free(void) APPLE_KEXT_OVERRIDE;
 };
 

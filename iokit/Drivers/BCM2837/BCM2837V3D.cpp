@@ -97,6 +97,17 @@ v3d_bug_on(const char *file, int line)
 /* ============================ V3DBuffer ============================ */
 
 V3DBuffer *
+V3DBuffer::empty(void)
+{
+	V3DBuffer *b = new V3DBuffer;
+	if (b != NULL && !b->init()) {
+		b->release();
+		b = NULL;
+	}
+	return b;
+}
+
+V3DBuffer *
 V3DBuffer::withSize(uint32_t size)
 {
 	if (size == 0 || size > kMaxBOSize) {
@@ -803,11 +814,8 @@ BCM2837V3D::allocBinSlice(uint32_t size)
 	if (first == kBinSlotCount) {
 		return NULL;
 	}
-	V3DBuffer *b = new V3DBuffer;
-	if (b == NULL || !b->init()) {
-		if (b != NULL) {
-			b->release();
-		}
+	V3DBuffer *b = V3DBuffer::empty();
+	if (b == NULL) {
 		freeBinSlots(first, n);
 		return NULL;
 	}

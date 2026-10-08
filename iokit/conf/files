@@ -72,6 +72,13 @@ iokit/Drivers/BCM2837/SMSC9514USBTransport.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/SMSC9514Ethernet.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/SMSC9514USBDriver.cpp		optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837Mailbox.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837V3D.cpp		optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837V3DUserClient.cpp	optional iokitcpp
+iokit/Drivers/BCM2837/v3d_exec.c		optional iokitcpp
+iokit/Drivers/BCM2837/v3d_kglue.c		optional iokitcpp
+iokit/Drivers/BCM2837/vc4_validate.c		optional iokitcpp
+iokit/Drivers/BCM2837/vc4_validate_shaders.c	optional iokitcpp
+iokit/Drivers/BCM2837/vc4_render_cl.c		optional iokitcpp
 
 iokit/Kernel/IODeviceTreeSupport.cpp			optional iokitcpp
 

@@ -2416,7 +2416,6 @@ void AppleUSBCDCECMData::receivePacket(UInt8 *packet, UInt32 size)
     }
 
         // Too short to be an Ethernet frame (two addresses and a type).
-        // Added by tools/vendor_usb_into_xnu.sh, FIX 3 (DAR-374).
     if (size < (2 * kIOEthernetAddressSize + 2))
     {
         XTRACE(this, 0, size, "receivePacket - Runt frame, packet dropped");

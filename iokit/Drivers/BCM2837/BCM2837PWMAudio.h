@@ -36,6 +36,7 @@
 #include <IOKit/audio/IOAudioToggleControl.h>
 #include <IOKit/IOTimerEventSource.h>
 #include <kern/thread_call.h>
+#include <kern/thread.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "BCM2837PWM.h"
@@ -82,7 +83,8 @@ private:
 	void updateGain();
 	void selfTest();
 	void selfTestRun(bool ok);
-	static void selfTestThread(thread_call_param_t p0, thread_call_param_t p1);
+	static void selfTestThread(void *p0, wait_result_t w);
+	bool selfTestOk;
 	void fillRingMidScale(uint32_t firstFrame, uint32_t numFrames);
 
 	BCM2837PWM              *fPWM;

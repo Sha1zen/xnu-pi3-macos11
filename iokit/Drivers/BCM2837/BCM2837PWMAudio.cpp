@@ -514,29 +514,31 @@ BCM2837PWMAudioEngine::selfTest()
 	fVolume = kVolumeMax;
 	updateGain();
 
-	// The engine run must not happen inside initHardware(): that runs on the
-	// device's work loop, whose timer (sim) and gate the engine needs. Do it
-	// from a thread call a second later; it holds a reference on the engine.
+	// The engine run must not happen inside initHardware() (it runs on the
+	// device's work loop), and must not sit in a thread-call worker blocked in
+	// IOSleep() (the sim time stamps are thread calls too): use a thread of
+	// its own, holding a reference on the engine.
+	selfTestOk = ok;
 	retain();
-	thread_call_t tc = thread_call_allocate(&BCM2837PWMAudioEngine::selfTestThread, this);
-	if (tc == NULL) {
+	thread_t th = THREAD_NULL;
+	if (kernel_thread_start(&BCM2837PWMAudioEngine::selfTestThread, this, &th) != KERN_SUCCESS) {
 		release();
 		ok = false;
 	} else {
-		uint64_t dl;
-		clock_interval_to_deadline(1000, 1000 * 1000, &dl);
-		thread_call_enter1_delayed(tc, (thread_call_param_t)(uintptr_t)ok, dl);
+		thread_deallocate(th);
 		return;
 	}
 	IOLog("BCM2837PWMAudio: selftest %s\n", ok ? "PASS" : "FAIL");
 }
 
 void
-BCM2837PWMAudioEngine::selfTestThread(thread_call_param_t p0, thread_call_param_t p1)
+BCM2837PWMAudioEngine::selfTestThread(void *p0, wait_result_t)
 {
 	BCM2837PWMAudioEngine *me = (BCM2837PWMAudioEngine *)p0;
-	me->selfTestRun(p1 != NULL);
+	IOSleep(1000);          // let the device finish start()
+	me->selfTestRun(me->selfTestOk);
 	me->release();
+	thread_terminate(current_thread());
 }
 
 // Engine start / time stamps / stop (see selfTest()).

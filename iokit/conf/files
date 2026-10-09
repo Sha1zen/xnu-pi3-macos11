@@ -60,6 +60,7 @@ iokit/Network/IONetworkUserClient.cpp			optional iokitcpp
 
 iokit/Drivers/BCM2837/BCM2837InterruptController.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837DMA.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PlatformExpert.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837ArmIO.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837LocalIntc.cpp		optional iokitcpp

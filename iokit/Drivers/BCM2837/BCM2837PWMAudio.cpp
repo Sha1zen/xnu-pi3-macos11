@@ -541,6 +541,8 @@ BCM2837PWMAudioEngine::selfTestRun(bool ok)
 		IOLog("BCM2837PWMAudio: selftest startAudioEngine %#x\n", r);
 		ok = false;
 	} else {
+		IOLog("BCM2837PWMAudio: selftest: engine wl=%p timer wl=%p enabled=%d state=%d\n", getWorkLoop(),
+		    fSimTimer ? fSimTimer->getWorkLoop() : NULL, fSimTimer ? fSimTimer->isEnabled() : -1, (int)getState());
 		IOSleep(400);
 		const IOAudioEngineStatus *st = getStatus();
 		uint32_t loops = st ? st->fCurrentLoopCount : 0;

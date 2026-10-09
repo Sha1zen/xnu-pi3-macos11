@@ -317,3 +317,18 @@ iokit/HID/IOUSBHIDDriver/IOUSBCompositeDriver.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBHub/AppleUSBHub.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBHub/AppleUSBHubPort.cpp		optional iokitcpp
 iokit/Drivers/AppleUSBHub/AppleUSBHubMissingDefinitions.cpp		optional iokitcpp
+
+# --- Audio (IOAudioFamily-300.6.1), vendored by tools/vendor_ioaudio_into_xnu.sh ---
+iokit/Audio/IOAudioFamily/BigNum128.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioControl.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioControlUserClient.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioDevice.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioEngine.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioEngineMixer.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioEngineUserClient.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioLevelControl.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioPort.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioSelectorControl.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioStream.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioTimeIntervalFilter.cpp		optional iokitcpp
+iokit/Audio/IOAudioFamily/IOAudioToggleControl.cpp		optional iokitcpp

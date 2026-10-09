@@ -70,6 +70,7 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 	fCbMem = NULL;
 	fCb = NULL;
 	fSimTimer = NULL;
+	fSimFires = 0;
 	fVolume = kVolumeMax;
 	fMute = false;
 	fGainQ16 = 0x10000;
@@ -293,6 +294,9 @@ void
 BCM2837PWMAudioEngine::simTimerFired(OSObject *owner, IOTimerEventSource *sender)
 {
 	BCM2837PWMAudioEngine *me = OSDynamicCast(BCM2837PWMAudioEngine, owner);
+	if (me) {
+		me->fSimFires++;
+	}
 	if (me == NULL || me->getState() != kIOAudioEngineRunning) {
 		return;
 	}
@@ -539,7 +543,7 @@ BCM2837PWMAudioEngine::selfTestRun(bool ok)
 		uint32_t loops = st ? st->fCurrentLoopCount : 0;
 		stopAudioEngine();
 		// 400 ms is 4 trips round the 85 ms ring at 48 kHz.
-		IOLog("BCM2837PWMAudio: selftest engine ran 400 ms, loop count %u\n", loops);
+		IOLog("BCM2837PWMAudio: selftest engine ran 400 ms, loop count %u (sim timer fired %u)\n", loops, fSimFires);
 		if (loops < 3) {
 			ok = false;
 		}

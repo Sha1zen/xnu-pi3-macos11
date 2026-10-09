@@ -102,6 +102,7 @@ private:
 	uint32_t                 fCbBus;
 
 	IOTimerEventSource      *fSimTimer;
+	volatile uint32_t        fSimFires;
 	uint64_t                 fSimStartNs;
 	AbsoluteTime             fSimStartAbs;
 

@@ -295,7 +295,9 @@ BCM2837PWMAudioEngine::simArm()
 {
 	uint64_t dl;
 	clock_interval_to_deadline((UInt32)((uint64_t)kPWMAudioFrames * 1000000 / fRate), 1000, &dl);
-	thread_call_enter_delayed(fSimCall, dl);
+	uint64_t now = mach_absolute_time();
+	boolean_t was = thread_call_enter_delayed(fSimCall, dl);
+	IOLog("BCM2837PWMAudio: simArm now=%llu deadline=%llu was_pending=%d\n", now, dl, (int)was);
 }
 
 void

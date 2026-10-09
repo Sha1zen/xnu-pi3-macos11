@@ -313,6 +313,7 @@ BCM2837PWMAudioEngine::simTimerFired(thread_call_param_t p0, thread_call_param_t
 IOReturn
 BCM2837PWMAudioEngine::performAudioEngineStart()
 {
+	IOLog("BCM2837PWMAudio: performAudioEngineStart (rate %u, sim %d)\n", fRate, (int)fSim);
 	uint32_t rng = 0, actual = 0;
 	IOReturn r = fPWM->configure(fRate, &rng, &actual);
 	if (r != kIOReturnSuccess) {
@@ -328,6 +329,7 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		takeTimeStamp(false);
 		fSimActive = true;
 		simArm();
+		IOLog("BCM2837PWMAudio: sim armed\n");
 		fPWM->startOutput();
 		return kIOReturnSuccess;
 	}

@@ -3,6 +3,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOWorkLoop.h>
+#include <pexpert/pexpert.h>
 
 extern "C" {
 void _disable_preemption(void);
@@ -173,6 +174,10 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 	}
 	IOLog("BCM2837PWMAudio: engine ready (%s), %u frames, %u periods\n", fSim ? "simulated" : "PWM+DMA",
 	    (unsigned)kPWMAudioFrames, (unsigned)kPWMAudioPeriods);
+	uint32_t test = 0;
+	if (PE_parse_boot_argn("audio-selftest", &test, sizeof(test)) && test) {
+		selfTest();
+	}
 	return true;
 }
 
@@ -431,4 +436,86 @@ BCM2837PWMAudioEngine::eraseOutputSamples(const void *, void *sampleBuf, UInt32 
 	    numSampleFrames * kBytesPerSampleFrame);
 	fillRingMidScale(firstSampleFrame, numSampleFrames);
 	return kIOReturnSuccess;
+}
+
+// Boot-arg audio-selftest=1. Checks, without userland: (1) the float -> s16 ->
+// PWM word conversion at known points, incl. clipping, (2) volume/mute gain,
+// (3) that the engine starts, advances its time stamps, and stops. In
+// simulated mode (QEMU) the time stamps come from the timer; on hardware from
+// the DMA ring's interrupt, so (3) doubles as the first real DMA test.
+void
+BCM2837PWMAudioEngine::selfTest()
+{
+	bool ok = true;
+	enum { kN = 8 };
+	float mix[kN * 2];
+	int16_t out[kPWMAudioFrames * 2];
+	(void)out;
+
+	IOAudioStreamFormat fmt;
+	bzero(&fmt, sizeof(fmt));
+	fmt.fNumChannels = 2;
+	fmt.fBitDepth = 16;
+
+	_disable_preemption();
+	const float pts[kN] = { 0.0f, 0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 0.25f };
+	for (int i = 0; i < kN; i++) {
+		mix[i * 2] = pts[i];
+		mix[i * 2 + 1] = -pts[i];
+	}
+	_enable_preemption();
+
+	fRng = kDefaultRng;
+	fGainQ16 = 0x10000;
+	if (clipOutputSamples(mix, fSampleBuffer, 0, kN, &fmt, NULL) != kIOReturnSuccess) {
+		ok = false;
+	}
+	const int16_t *s = (const int16_t *)fSampleBuffer;
+	const int16_t want[kN] = { 0, 16383, -16383, 32767, -32767, 32767, -32767, 8191 };
+	for (int i = 0; i < kN; i++) {
+		if (s[i * 2] != want[i] || s[i * 2 + 1] != -want[i] ||
+		    fRing[i * 2] != pwmDatFromS16(want[i], fRng) ||
+		    fRing[i * 2 + 1] != pwmDatFromS16((int16_t)-want[i], fRng)) {
+			IOLog("BCM2837PWMAudio: selftest frame %d: got %d/%d ring %u/%u, want %d\n", i, s[i * 2],
+			    s[i * 2 + 1], fRing[i * 2], fRing[i * 2 + 1], want[i]);
+			ok = false;
+		}
+	}
+	fVolume = 50;
+	updateGain();
+	clipOutputSamples(mix, fSampleBuffer, 0, kN, &fmt, NULL);
+	int expect50 = (32767 * (int)fGainQ16) >> 16;
+	if (s[3 * 2] != expect50 || fGainQ16 != 16384) {
+		IOLog("BCM2837PWMAudio: selftest volume 50: got %d want %d gain %u\n", s[3 * 2], expect50, fGainQ16);
+		ok = false;
+	}
+	fMute = true;
+	updateGain();
+	clipOutputSamples(mix, fSampleBuffer, 0, kN, &fmt, NULL);
+	if (s[3 * 2] != 0 || fRing[3 * 2] != fRng / 2) {
+		IOLog("BCM2837PWMAudio: selftest mute: got %d ring %u\n", s[3 * 2], fRing[3 * 2]);
+		ok = false;
+	}
+	fMute = false;
+	fVolume = kVolumeMax;
+	updateGain();
+
+	// Engine start / time stamps / stop. Needs the family's work loop, so
+	// run it here from start() context like any driver would at probe.
+	IOReturn r = startAudioEngine();
+	if (r != kIOReturnSuccess) {
+		IOLog("BCM2837PWMAudio: selftest startAudioEngine %#x\n", r);
+		ok = false;
+	} else {
+		IOSleep(400);
+		const IOAudioEngineStatus *st = getStatus();
+		uint32_t loops = st ? st->fCurrentLoopCount : 0;
+		stopAudioEngine();
+		// 400 ms is 4 trips round the 85 ms ring at 48 kHz.
+		IOLog("BCM2837PWMAudio: selftest engine ran 400 ms, loop count %u\n", loops);
+		if (loops < 3) {
+			ok = false;
+		}
+	}
+	IOLog("BCM2837PWMAudio: selftest %s\n", ok ? "PASS" : "FAIL");
 }

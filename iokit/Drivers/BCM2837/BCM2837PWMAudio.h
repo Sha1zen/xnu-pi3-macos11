@@ -78,6 +78,7 @@ private:
 	static void dmaCallback(void *ref, uint32_t channel, uint32_t cs);
 	static void simTimerFired(OSObject *owner, IOTimerEventSource *sender);
 	void updateGain();
+	void selfTest();
 	void fillRingMidScale(uint32_t firstFrame, uint32_t numFrames);
 
 	BCM2837PWM              *fPWM;

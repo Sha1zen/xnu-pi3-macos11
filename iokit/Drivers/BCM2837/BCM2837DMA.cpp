@@ -302,10 +302,11 @@ BCM2837DMA::selfTest()
 	} else {
 		IOLog("BCM2837DMA: self-test: setup failed\n");
 	}
-	for (IOBufferMemoryDescriptor *b : { src, dst, cbm }) {
-		if (b) {
-			b->complete();
-			b->release();
+	IOBufferMemoryDescriptor *bufs[3] = { src, dst, cbm };
+	for (int i = 0; i < 3; i++) {
+		if (bufs[i]) {
+			bufs[i]->complete();
+			bufs[i]->release();
 		}
 	}
 }

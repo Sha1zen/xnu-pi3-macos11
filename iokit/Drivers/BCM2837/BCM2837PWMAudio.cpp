@@ -320,7 +320,10 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		clock_get_uptime(&fSimStartAbs);
 		absolutetime_to_nanoseconds(fSimStartAbs, &fSimStartNs);
 		takeTimeStamp(false);
-		fSimTimer->setTimeoutUS((UInt32)((uint64_t)kPWMAudioFrames * 1000000 / fRate));
+		IOReturn tr = fSimTimer->setTimeoutUS((UInt32)((uint64_t)kPWMAudioFrames * 1000000 / fRate));
+		if (tr != kIOReturnSuccess) {
+			IOLog("BCM2837PWMAudio: sim timer arm failed %#x (enabled=%d)\n", tr, fSimTimer->isEnabled());
+		}
 		fPWM->startOutput();
 		return kIOReturnSuccess;
 	}

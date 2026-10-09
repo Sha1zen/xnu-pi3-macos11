@@ -437,6 +437,7 @@ enum {
 	kBcm2837TagSetPixelOrder  = 0x00048006,
 	kBcm2837TagAllocateBuffer = 0x00040001,
 	kBcm2837TagGetPitch       = 0x00040008,
+	kBcm2837TagGetPhysicalWH  = 0x00040003,
 	kBcm2837TagEnd            = 0,
 
 	/*
@@ -595,9 +596,9 @@ bcm2837_video_init(PE_Video *video)
 	static uint32_t sMboxMsg[kBcm2837MsgWords] __attribute__((aligned(16)));
 	uint32_t *b = sMboxMsg;
 
-	/* Requested size: BCM2837_FB_WIDTH x BCM2837_FB_HEIGHT unless BOTH
-	 * "fb_width" and "fb_height" boot-args are given and in range (set
-	 * them on real hardware with uEnv.txt's extra_bootargs). */
+	/* Requested size: BOTH "fb_width" and "fb_height" boot-args if given and
+	 * in range (uEnv.txt's extra_bootargs), else the display's native size
+	 * (below), else BCM2837_FB_WIDTH x BCM2837_FB_HEIGHT. */
 	uint32_t reqW = BCM2837_FB_WIDTH, reqH = BCM2837_FB_HEIGHT;
 	uint32_t argW = 0, argH = 0;
 	if (PE_parse_boot_argn("fb_width", &argW, sizeof(argW)) &&
@@ -606,6 +607,37 @@ bcm2837_video_init(PE_Video *video)
 	    argH >= BCM2837_FB_MIN_H && argH <= BCM2837_FB_MAX_H) {
 		reqW = argW;
 		reqH = argH;
+	} else {
+		/* No (valid) override: use the display's native size. Get
+		 * Physical W/H (tag 0x00040003, firmware wiki "Get physical
+		 * (display) width/height") reports the mode the firmware set
+		 * up for the attached monitor, i.e. its EDID-preferred mode
+		 * unless config.txt overrides it. With nothing attached, or
+		 * on QEMU, it reports the firmware default and we keep
+		 * whatever that is. A size above our gpu_mem-backed bounds
+		 * is capped to 1920x1080 (the HVS scales the framebuffer to
+		 * the output mode). */
+		static uint32_t sQueryMsg[8] __attribute__((aligned(16)));
+		sQueryMsg[0] = sizeof(sQueryMsg);
+		sQueryMsg[1] = 0;
+		sQueryMsg[2] = kBcm2837TagGetPhysicalWH;
+		sQueryMsg[3] = 8;
+		sQueryMsg[4] = 0;
+		sQueryMsg[5] = 0;
+		sQueryMsg[6] = 0;
+		sQueryMsg[7] = kBcm2837TagEnd;
+		if (bcm2837_mbox_call(mboxBase, sQueryMsg)) {
+			uint32_t nativeW = sQueryMsg[5], nativeH = sQueryMsg[6];
+			kprintf("bcm2837_video_init: display reports %ux%u\n", nativeW, nativeH);
+			if (nativeW >= BCM2837_FB_MIN_W && nativeH >= BCM2837_FB_MIN_H) {
+				if (nativeW > BCM2837_FB_MAX_W || nativeH > BCM2837_FB_MAX_H) {
+					nativeW = 1920;
+					nativeH = 1080;
+				}
+				reqW = nativeW;
+				reqH = nativeH;
+			}
+		}
 	}
 
 	b[kMsgIdxCode] = 0; /* RPI_FIRMWARE_STATUS_REQUEST */

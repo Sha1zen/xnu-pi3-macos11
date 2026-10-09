@@ -28,6 +28,7 @@
 #ifndef BCM2837PWMAUDIO_H
 #define BCM2837PWMAUDIO_H
 
+#include <IOKit/audio/IOAudioDefines.h>
 #include <IOKit/audio/IOAudioDevice.h>
 #include <IOKit/audio/IOAudioEngine.h>
 #include <IOKit/audio/IOAudioStream.h>

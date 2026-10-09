@@ -690,7 +690,13 @@ int msdosfs_createde(
 	}
 	
 	/* NOTE: DE_EXTERNALIZE does not set the name or lower case flags */
-	bcopy(dep->de_Name, ndep->deName, 11);
+	/*
+	 * 11 bytes = deName[8] + deExtension[3], which are adjacent at the start
+	 * of struct dosdirentry (direntry.h).  Copying 11 bytes to ndep->deName
+	 * trips __memmove_chk (object size 8) and panics under FORTIFY_SOURCE,
+	 * so address the whole entry instead.
+	 */
+	bcopy(dep->de_Name, (void *)ndep, 11);
 	ndep->deLowerCase = dep->de_LowerCase;
 	DE_EXTERNALIZE(ndep, dep);
 

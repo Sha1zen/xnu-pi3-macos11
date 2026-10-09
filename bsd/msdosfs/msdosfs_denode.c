@@ -410,7 +410,7 @@ int msdosfs_deget(
 		/* Get the non-date values from the given directory entry */
 		error = msdosfs_readep(pmp, dirclust, diroffset, &bp, &direntptr, context);
 		if (error) goto fail;
-		bcopy(direntptr->deName, dep->de_Name, 11);
+		bcopy((const void *)direntptr, dep->de_Name, 11);	/* deName[8]+deExtension[3], see msdosfs_createde */
 		dep->de_Attributes = direntptr->deAttributes;
 		dep->de_LowerCase = direntptr->deLowerCase;
 		dep->de_StartCluster = getuint16(direntptr->deStartCluster);

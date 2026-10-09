@@ -302,6 +302,7 @@ void
 BCM2837PWMAudioEngine::simTimerFired(thread_call_param_t p0, thread_call_param_t)
 {
 	BCM2837PWMAudioEngine *me = (BCM2837PWMAudioEngine *)p0;
+	IOLog("BCM2837PWMAudio: sim callback (active=%d)\n", (int)me->fSimActive);
 	if (!me->fSimActive) {
 		return;
 	}

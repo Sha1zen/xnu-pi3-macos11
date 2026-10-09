@@ -77,7 +77,8 @@ private:
 	static IOReturn volumeChanged(OSObject *target, IOAudioControl *control, SInt32 oldValue, SInt32 newValue);
 	static IOReturn muteChanged(OSObject *target, IOAudioControl *control, SInt32 oldValue, SInt32 newValue);
 	static void dmaCallback(void *ref, uint32_t channel, uint32_t cs);
-	static void simTimerFired(OSObject *owner, IOTimerEventSource *sender);
+	static void simTimerFired(thread_call_param_t p0, thread_call_param_t p1);
+	void simArm();
 	void updateGain();
 	void selfTest();
 	void selfTestRun(bool ok);
@@ -101,7 +102,8 @@ private:
 	BCM2837DMAControlBlock  *fCb;
 	uint32_t                 fCbBus;
 
-	IOTimerEventSource      *fSimTimer;
+	thread_call_t            fSimCall;
+	volatile bool            fSimActive;
 	volatile uint32_t        fSimFires;
 	uint64_t                 fSimStartNs;
 	AbsoluteTime             fSimStartAbs;

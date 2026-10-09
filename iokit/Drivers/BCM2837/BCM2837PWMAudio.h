@@ -35,6 +35,7 @@
 #include <IOKit/audio/IOAudioLevelControl.h>
 #include <IOKit/audio/IOAudioToggleControl.h>
 #include <IOKit/IOTimerEventSource.h>
+#include <kern/thread_call.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "BCM2837PWM.h"
@@ -79,6 +80,8 @@ private:
 	static void simTimerFired(OSObject *owner, IOTimerEventSource *sender);
 	void updateGain();
 	void selfTest();
+	void selfTestRun(bool ok);
+	static void selfTestThread(thread_call_param_t p0, thread_call_param_t p1);
 	void fillRingMidScale(uint32_t firstFrame, uint32_t numFrames);
 
 	BCM2837PWM              *fPWM;

@@ -500,8 +500,35 @@ BCM2837PWMAudioEngine::selfTest()
 	fVolume = kVolumeMax;
 	updateGain();
 
-	// Engine start / time stamps / stop. Needs the family's work loop, so
-	// run it here from start() context like any driver would at probe.
+	// The engine run must not happen inside initHardware(): that runs on the
+	// device's work loop, whose timer (sim) and gate the engine needs. Do it
+	// from a thread call a second later; it holds a reference on the engine.
+	retain();
+	thread_call_t tc = thread_call_allocate(&BCM2837PWMAudioEngine::selfTestThread, this);
+	if (tc == NULL) {
+		release();
+		ok = false;
+	} else {
+		uint64_t dl;
+		clock_interval_to_deadline(1000, 1000 * 1000, &dl);
+		thread_call_enter1_delayed(tc, (thread_call_param_t)(uintptr_t)ok, dl);
+		return;
+	}
+	IOLog("BCM2837PWMAudio: selftest %s\n", ok ? "PASS" : "FAIL");
+}
+
+void
+BCM2837PWMAudioEngine::selfTestThread(thread_call_param_t p0, thread_call_param_t p1)
+{
+	BCM2837PWMAudioEngine *me = (BCM2837PWMAudioEngine *)p0;
+	me->selfTestRun(p1 != NULL);
+	me->release();
+}
+
+// Engine start / time stamps / stop (see selfTest()).
+void
+BCM2837PWMAudioEngine::selfTestRun(bool ok)
+{
 	IOReturn r = startAudioEngine();
 	if (r != kIOReturnSuccess) {
 		IOLog("BCM2837PWMAudio: selftest startAudioEngine %#x\n", r);

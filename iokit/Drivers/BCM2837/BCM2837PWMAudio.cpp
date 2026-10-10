@@ -843,6 +843,10 @@ BCM2837PWMAudioEngine::calibrateRate()
 	for (int i = 0; i < 40; i++) {
 		uint32_t src = fDMA->readChannelReg(fChannel, kRegSourceAd);
 		uint64_t now = mach_absolute_time();
+		if (i < 8) {
+			IOLog("BCM2837PWMAudio: calib sample %d: SRC=%#x (ring %#x, +%u) t=%llu CS=%#x\n", i, src, fRingBus,
+			    src - fRingBus, now, fDMA->readChannelReg(fChannel, 0));
+		}
 		if (src >= fRingBus && src < fRingBus + ringBytes) {
 			uint32_t pos = (src - fRingBus) / kBytesPerRingFrame;
 			if (have) {

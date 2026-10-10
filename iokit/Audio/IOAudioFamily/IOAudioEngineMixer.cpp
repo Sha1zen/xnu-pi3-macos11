@@ -25,6 +25,13 @@
 #include "IOAudioStream.h"
 #include "IOAudioTypes.h"
 
+// Kernel FP registers are not preserved across a context switch (osfmk/arm64/
+// cswitch.s:87-101), so the float add below runs with preemption disabled.
+extern "C" {
+void _disable_preemption(void);
+void _enable_preemption(void);
+}
+
 
 IOReturn IOAudioEngine::mixOutputSamples(const void *sourceBuf, void *mixBuf, UInt32 firstSampleFrame, UInt32 numSampleFrames, const IOAudioStreamFormat *streamFormat, IOAudioStream *audioStream)
 {
@@ -50,8 +57,10 @@ IOReturn IOAudioEngine::mixOutputSamples(const void *sourceBuf, void *mixBuf, UI
 		// unit strides is exactly resultBuf[i] = source1[i] + source2[i]; the
 		// output may alias source2 (floatMixBuf == floatSource2Buf), which
 		// element-wise in-order addition handles.
+		_disable_preemption();
 		for (__darwin_size_t i = 0; i < numSamps; i++)
 			floatMixBuf[i * resultStride] = floatSource1Buf[i * strideOne] + floatSource2Buf[i * strideTwo];
+		_enable_preemption();
 		
         result = kIOReturnSuccess;
     }

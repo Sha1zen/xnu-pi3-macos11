@@ -758,9 +758,18 @@ BCM2837PWMAudioEngine::toneTestRun()
 			intact = fRing[f * 2] == pwmDatFromS16(kToneTable[f], fRng);
 		}
 		const IOAudioEngineStatus *st = getStatus();
-		IOLog("BCM2837PWMAudio: audio-test: t=%us pos=%u loops=%u PWM STA=%#x CTL=%#x dmaErrors=%u tone %s\n", t,
+		IOLog("BCM2837PWMAudio: audio-test: t=%us pos=%u loops=%u PWM STA=%#x CTL=%#x DMAC=%#x dmaErrors=%u tone %s\n", t,
 		    (unsigned)getCurrentSampleFrame(), st ? (unsigned)st->fCurrentLoopCount : 0,
-		    fPWM->readReg(0x04), fPWM->readReg(0x00), (unsigned)fDmaErrors, intact ? "intact" : "ERASED");
+		    fPWM->readReg(0x04), fPWM->readReg(0x00), fPWM->readReg(0x08), (unsigned)fDmaErrors,
+		    intact ? "intact" : "ERASED");
+		if (fHaveChannel && !fSim && t <= 3) {
+			// Raw DMA channel registers (BCM2837DMA.h): where is it and why?
+			IOLog("BCM2837PWMAudio: audio-test: DMA ch%u CS=%#x CONBLK=%#x TI=%#x SRC=%#x DST=%#x LEN=%#x NEXT=%#x DEBUG=%#x (ring %#x cb %#x)\n",
+			    fChannel, fDMA->readChannelReg(fChannel, 0x00), fDMA->readChannelReg(fChannel, 0x04),
+			    fDMA->readChannelReg(fChannel, 0x08), fDMA->readChannelReg(fChannel, 0x0c),
+			    fDMA->readChannelReg(fChannel, 0x10), fDMA->readChannelReg(fChannel, 0x14),
+			    fDMA->readChannelReg(fChannel, 0x1c), fDMA->readChannelReg(fChannel, 0x20), fRingBus, fCbBus);
+		}
 	}
 	// The last client going away stops the engine (the family's own path).
 	decrementActiveUserClients();

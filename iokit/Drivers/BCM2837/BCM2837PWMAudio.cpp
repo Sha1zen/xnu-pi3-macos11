@@ -403,7 +403,6 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		return r;
 	}
 	takeTimeStamp(false);
-	calibrateRate();
 	// Bring-up (DARW-317): sample the DMA channel just before and just after the
 	// PWM is enabled, to see when and why it stops (audio-dbg=1).
 	uint32_t dbg = 0;
@@ -438,6 +437,8 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 	if (r != kIOReturnSuccess) {
 		fDMA->freeChannel(fChannel);
 		fHaveChannel = false;
+	} else {
+		calibrateRate();        // needs the PWM draining the ring
 	}
 	return r;
 }
@@ -843,10 +844,6 @@ BCM2837PWMAudioEngine::calibrateRate()
 	for (int i = 0; i < 40; i++) {
 		uint32_t src = fDMA->readChannelReg(fChannel, kRegSourceAd);
 		uint64_t now = mach_absolute_time();
-		if (i < 8) {
-			IOLog("BCM2837PWMAudio: calib sample %d: SRC=%#x (ring %#x, +%u) t=%llu CS=%#x\n", i, src, fRingBus,
-			    src - fRingBus, now, fDMA->readChannelReg(fChannel, 0));
-		}
 		if (src >= fRingBus && src < fRingBus + ringBytes) {
 			uint32_t pos = (src - fRingBus) / kBytesPerRingFrame;
 			if (have) {

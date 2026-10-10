@@ -3,6 +3,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOCommandGate.h>
 #include <pexpert/pexpert.h>
 
 extern "C" {

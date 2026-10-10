@@ -438,6 +438,7 @@ enum {
 	kBcm2837TagAllocateBuffer = 0x00040001,
 	kBcm2837TagGetPitch       = 0x00040008,
 	kBcm2837TagGetPhysicalWH  = 0x00040003,
+	kBcm2837TagGetPixelOrder  = 0x00040006,
 	kBcm2837TagEnd            = 0,
 
 	/*
@@ -680,6 +681,42 @@ bcm2837_video_init(PE_Video *video)
 
 	if (!bcm2837_mbox_call(mboxBase, b)) {
 		return FALSE;
+	}
+
+	/* u-boot (drivers/video/bcm2835.c) already brought the display up at
+	 * its native size with BCM2835_MBOX_PIXEL_ORDER_RGB. Now that we ask
+	 * for that same size, the firmware can hand back that framebuffer
+	 * without applying our Set Pixel Order (a different size used to force
+	 * a fresh one), leaving RGB where video_console.c and Xorg's
+	 * 0xff0000 masks need BGR: red and blue swapped. Read the order back;
+	 * if it isn't BGR, set it again on its own. */
+	static uint32_t sOrderMsg[8] __attribute__((aligned(16)));
+	for (int attempt = 0; attempt < 2; attempt++) {
+		sOrderMsg[0] = sizeof(sOrderMsg);
+		sOrderMsg[1] = 0;
+		sOrderMsg[2] = kBcm2837TagGetPixelOrder;
+		sOrderMsg[3] = 4;
+		sOrderMsg[4] = 0;
+		sOrderMsg[5] = 0xFFFFFFFF;
+		sOrderMsg[6] = kBcm2837TagEnd;
+		sOrderMsg[7] = 0;
+		if (!bcm2837_mbox_call(mboxBase, sOrderMsg)) {
+			break;
+		}
+		kprintf("bcm2837_video_init: pixel order %u (0=BGR)%s\n", sOrderMsg[5],
+		    sOrderMsg[5] == kBcm2837PixelOrderBGR ? "" : ", re-setting");
+		if (sOrderMsg[5] == kBcm2837PixelOrderBGR) {
+			break;
+		}
+		sOrderMsg[0] = sizeof(sOrderMsg);
+		sOrderMsg[1] = 0;
+		sOrderMsg[2] = kBcm2837TagSetPixelOrder;
+		sOrderMsg[3] = 4;
+		sOrderMsg[4] = 0;
+		sOrderMsg[5] = kBcm2837PixelOrderBGR;
+		sOrderMsg[6] = kBcm2837TagEnd;
+		sOrderMsg[7] = 0;
+		(void) bcm2837_mbox_call(mboxBase, sOrderMsg);
 	}
 
 	/* The returned bus address has one of the VC alias bits (0x40000000/

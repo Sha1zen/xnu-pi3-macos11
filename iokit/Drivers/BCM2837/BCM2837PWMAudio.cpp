@@ -287,6 +287,7 @@ BCM2837PWMAudioEngine::simThread(void *p0, wait_result_t)
 {
 	BCM2837PWMAudioEngine *me = (BCM2837PWMAudioEngine *)p0;
 	const uint32_t ms = (uint32_t)((uint64_t)kPWMAudioFrames * 1000 / me->fRate);
+	IOLog("BCM2837PWMAudio: sim thread running, %u ms per ring\n", ms);
 	while (me->fSimActive) {
 		IOSleep(ms);
 		if (!me->fSimActive) {
@@ -546,7 +547,10 @@ BCM2837PWMAudioEngine::selfTestRun(bool ok)
 		IOLog("BCM2837PWMAudio: selftest startAudioEngine %#x\n", r);
 		ok = false;
 	} else {
+		uint64_t t0 = mach_absolute_time();
 		IOSleep(400);
+		uint64_t t1 = mach_absolute_time();
+		IOLog("BCM2837PWMAudio: selftest: IOSleep(400) took %llu ticks (24 MHz => %llu ms)\n", t1 - t0, (t1 - t0) / 24000);
 		const IOAudioEngineStatus *st = getStatus();
 		uint32_t loops = st ? st->fCurrentLoopCount : 0;
 		stopAudioEngine();

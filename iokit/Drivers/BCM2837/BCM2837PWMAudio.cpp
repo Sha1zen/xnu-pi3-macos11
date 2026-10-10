@@ -370,6 +370,7 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 IOReturn
 BCM2837PWMAudioEngine::performAudioEngineStop()
 {
+	IOLog("BCM2837PWMAudio: performAudioEngineStop (state %d)\n", (int)getState());
 	if (fSim) {
 		fSimActive = false;
 	}

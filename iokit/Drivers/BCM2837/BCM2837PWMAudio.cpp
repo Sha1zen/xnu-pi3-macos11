@@ -403,7 +403,37 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		return r;
 	}
 	takeTimeStamp(false);
+	// Bring-up (DARW-317): sample the DMA channel just before and just after the
+	// PWM is enabled, to see when and why it stops (audio-dbg=1).
+	uint32_t dbg = 0;
+	bool dbgOn = PE_parse_boot_argn("audio-dbg", &dbg, sizeof(dbg)) && dbg;
+	enum { kSamples = 24 };
+	uint32_t smp[kSamples][6];
+	if (dbgOn) {
+		smp[0][0] = fDMA->readChannelReg(fChannel, 0x00);
+		smp[0][1] = fDMA->readChannelReg(fChannel, 0x0c);
+		smp[0][2] = fDMA->readChannelReg(fChannel, 0x04);
+		smp[0][3] = fPWM->readReg(0x04);
+		smp[0][4] = fPWM->readReg(0x08);
+		smp[0][5] = fDMA->readChannelReg(fChannel, 0x20);
+	}
 	r = fPWM->startOutput();
+	if (dbgOn) {
+		for (int i = 1; i < kSamples; i++) {
+			IODelay(250);
+			smp[i][0] = fDMA->readChannelReg(fChannel, 0x00);
+			smp[i][1] = fDMA->readChannelReg(fChannel, 0x0c);
+			smp[i][2] = fDMA->readChannelReg(fChannel, 0x04);
+			smp[i][3] = fPWM->readReg(0x04);
+			smp[i][4] = fPWM->readReg(0x08);
+			smp[i][5] = fDMA->readChannelReg(fChannel, 0x20);
+		}
+		IOLog("BCM2837PWMAudio: audio-dbg: sample 0 is before PWM enable, then every ~250us\n");
+		for (int i = 0; i < kSamples; i++) {
+			IOLog("BCM2837PWMAudio: audio-dbg: %2d CS=%#x SRC=%#x CONBLK=%#x PWM.STA=%#x DMAC=%#x DEBUG=%#x\n", i,
+			    smp[i][0], smp[i][1], smp[i][2], smp[i][3], smp[i][4], smp[i][5]);
+		}
+	}
 	if (r != kIOReturnSuccess) {
 		fDMA->freeChannel(fChannel);
 		fHaveChannel = false;

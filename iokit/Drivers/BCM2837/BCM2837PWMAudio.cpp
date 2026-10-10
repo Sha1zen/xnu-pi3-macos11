@@ -69,7 +69,7 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 	fRing = NULL;
 	fCbMem = NULL;
 	fCb = NULL;
-	fSimCall = NULL;
+	fSimThreadRunning = 0;
 	fSimActive = false;
 	fSimFires = 0;
 	fVolume = kVolumeMax;
@@ -167,15 +167,6 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 		mute->release();
 	}
 
-	if (fSim) {
-		// A thread call, not an event source on the audio device's work loop:
-		// the timer there never fired (DARW-315 bring-up), and takeTimeStamp()
-		// is meant to be callable from any context anyway.
-		fSimCall = thread_call_allocate(&BCM2837PWMAudioEngine::simTimerFired, this);
-		if (fSimCall == NULL) {
-			return false;
-		}
-	}
 	IOLog("BCM2837PWMAudio: engine ready (%s), %u frames, %u periods\n", fSim ? "simulated" : "PWM+DMA",
 	    (unsigned)kPWMAudioFrames, (unsigned)kPWMAudioPeriods);
 	uint32_t test = 0;
@@ -188,11 +179,9 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 void
 BCM2837PWMAudioEngine::free()
 {
-	if (fSimCall) {
-		fSimActive = false;
-		thread_call_cancel_wait(fSimCall);
-		thread_call_free(fSimCall);
-		fSimCall = NULL;
+	fSimActive = false;
+	for (int i = 0; i < 1000 && fSimThreadRunning; i++) {
+		IOSleep(1);
 	}
 	if (fHaveChannel && fDMA) {
 		fDMA->freeChannel(fChannel);
@@ -290,33 +279,30 @@ BCM2837PWMAudioEngine::dmaCallback(void *ref, uint32_t, uint32_t cs)
 	}
 }
 
+// Simulated DMA: one time stamp per trip round the ring, from a thread that
+// sleeps for the ring's duration. (A thread call and an event source on the
+// device's work loop were both tried first and never fired in this build.)
 void
-BCM2837PWMAudioEngine::simArm()
-{
-	uint64_t dl;
-	clock_interval_to_deadline((UInt32)((uint64_t)kPWMAudioFrames * 1000000 / fRate), 1000, &dl);
-	uint64_t now = mach_absolute_time();
-	boolean_t was = thread_call_enter_delayed(fSimCall, dl);
-	IOLog("BCM2837PWMAudio: simArm now=%llu deadline=%llu was_pending=%d\n", now, dl, (int)was);
-}
-
-void
-BCM2837PWMAudioEngine::simTimerFired(thread_call_param_t p0, thread_call_param_t)
+BCM2837PWMAudioEngine::simThread(void *p0, wait_result_t)
 {
 	BCM2837PWMAudioEngine *me = (BCM2837PWMAudioEngine *)p0;
-	IOLog("BCM2837PWMAudio: sim callback (active=%d)\n", (int)me->fSimActive);
-	if (!me->fSimActive) {
-		return;
+	const uint32_t ms = (uint32_t)((uint64_t)kPWMAudioFrames * 1000 / me->fRate);
+	while (me->fSimActive) {
+		IOSleep(ms);
+		if (!me->fSimActive) {
+			break;
+		}
+		me->fSimFires++;
+		me->takeTimeStamp();
 	}
-	me->fSimFires++;
-	me->takeTimeStamp();
-	me->simArm();
+	me->fSimThreadRunning = 0;
+	me->release();
+	thread_terminate(current_thread());
 }
 
 IOReturn
 BCM2837PWMAudioEngine::performAudioEngineStart()
 {
-	IOLog("BCM2837PWMAudio: performAudioEngineStart (rate %u, sim %d)\n", fRate, (int)fSim);
 	uint32_t rng = 0, actual = 0;
 	IOReturn r = fPWM->configure(fRate, &rng, &actual);
 	if (r != kIOReturnSuccess) {
@@ -331,8 +317,16 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		absolutetime_to_nanoseconds(fSimStartAbs, &fSimStartNs);
 		takeTimeStamp(false);
 		fSimActive = true;
-		simArm();
-		IOLog("BCM2837PWMAudio: sim armed\n");
+		fSimThreadRunning = 1;
+		retain();
+		thread_t th = THREAD_NULL;
+		if (kernel_thread_start(&BCM2837PWMAudioEngine::simThread, this, &th) != KERN_SUCCESS) {
+			fSimActive = false;
+			fSimThreadRunning = 0;
+			release();
+			return kIOReturnNoResources;
+		}
+		thread_deallocate(th);
 		fPWM->startOutput();
 		return kIOReturnSuccess;
 	}
@@ -377,7 +371,6 @@ BCM2837PWMAudioEngine::performAudioEngineStop()
 {
 	if (fSim) {
 		fSimActive = false;
-		thread_call_cancel_wait(fSimCall);
 	}
 	if (fHaveChannel) {
 		fDMA->freeChannel(fChannel);        // stops the DMA first

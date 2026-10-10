@@ -353,6 +353,7 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 	fRng = rng;
 	fillRingMidScale(0, kPWMAudioFrames);
 	fLastPosition = 0;
+	fLastPositionLoop = 0;
 
 	if (fSim) {
 		clock_get_uptime(&fSimStartAbs);
@@ -460,11 +461,17 @@ BCM2837PWMAudioEngine::getCurrentSampleFrame()
 		return fLastPosition;
 	}
 	uint32_t pos = (src - fRingBus) / kBytesPerRingFrame;
-	uint32_t last = fLastPosition;
-	if (pos < last && last - pos <= kPWMAudioFrames / 2) {
-		return last;
+	// Within one trip round the ring the position only moves forward; once the
+	// loop count has moved on (a wrap was time-stamped) any position is valid.
+	// (Comparing positions alone wrongly rejected real wraps when reads were
+	// more than half a ring apart.)
+	const IOAudioEngineStatus *st = getStatus();
+	uint32_t loop = st ? st->fCurrentLoopCount : 0;
+	if (loop == fLastPositionLoop && pos < fLastPosition) {
+		return fLastPosition;
 	}
 	fLastPosition = pos;
+	fLastPositionLoop = loop;
 	return pos;
 }
 

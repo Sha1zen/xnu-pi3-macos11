@@ -21,7 +21,6 @@ OSDefineMetaClassAndStructors(BCM2837PWMAudioEngine, IOAudioEngine)
 enum {
 	kRegSourceAd = 0x0c,
 	kDefaultRate = 48000,
-	kDefaultRng  = kPWMTargetRange,
 	kBytesPerRingFrame = kPWMAudioChannels * sizeof(uint32_t),
 	kBytesPerSampleFrame = kPWMAudioChannels * sizeof(int16_t),
 	kVolumeMax   = 100,
@@ -72,7 +71,7 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 	fSim = false;
 	fHaveChannel = false;
 	fRate = kDefaultRate;
-	fRng = kDefaultRng;
+	fRng = pwmRangeFor(kPWMClockHz, kDefaultRate);
 	fSampleBuffer = NULL;
 	fRingMem = NULL;
 	fRing = NULL;
@@ -579,7 +578,7 @@ BCM2837PWMAudioEngine::selfTest()
 	}
 	_enable_preemption();
 
-	fRng = kDefaultRng;
+	fRng = pwmRangeFor(kPWMClockHz, kDefaultRate);
 	fGainQ16 = 0x10000;
 	if (clipOutputSamples(mix, fSampleBuffer, 0, kN, &fmt, NULL) != kIOReturnSuccess) {
 		ok = false;

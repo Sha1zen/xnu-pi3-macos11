@@ -15,13 +15,22 @@
 // high to bother, above 4096 the clock gets needlessly fast.
 #define kPWMMinRange 1024U
 #define kPWMMaxRange 4096U
-// Preferred range, 11 bits: 48000 * 2048 = 98.304 MHz.
-#define kPWMTargetRange 2048U
+// PWM clock: PLLD (500 MHz on the BCM2837) divided by 5, an integer divide so
+// there is no fractional-divider (MASH) jitter. The frame rate is then
+// 100 MHz / RANGE, with RANGE chosen to the nearest integer: 2083 for 48 kHz
+// (48007.7 Hz, +0.016%), 2268 for 44.1 kHz (44091.8 Hz, -0.019%), about 11 bits.
+// (A first version asked the firmware for rate * 2048 through the mailbox; on a
+// real Pi the firmware acknowledged it but the clock stayed at 62.5 MHz
+// (PLLD/8): the ring ran at 64% speed. See BCM2837PWM::programClock().)
+#define kPWMPllDHz       500000000U
+#define kPWMClockDivisor 5U
+#define kPWMClockHz      (kPWMPllDHz / kPWMClockDivisor)
 
 static inline uint32_t
 pwmTargetClockHz(uint32_t rateHz)
 {
-	return rateHz * kPWMTargetRange;
+	(void)rateHz;
+	return kPWMClockHz;
 }
 
 // Range for the clock the firmware actually gave us, rounded to nearest.

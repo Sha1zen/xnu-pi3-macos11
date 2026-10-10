@@ -52,9 +52,9 @@ BCM2837PWM::start(IOService *provider)
 	// there takes an external abort.
 	uint32_t audioArg = 1, simArg = 0, testArg = 0;
 	PE_parse_boot_argn("audio", &audioArg, sizeof(audioArg));
-	bool sim = PE_parse_boot_argn("pwm-sim", &simArg, sizeof(simArg)) && simArg;
-	bool test = PE_parse_boot_argn("pwm-test", &testArg, sizeof(testArg)) && testArg;
-	if ((audioArg == 0 && !test && !sim) || (provider->getProperty("sim-only") && !sim)) {
+	bool wantSim = PE_parse_boot_argn("pwm-sim", &simArg, sizeof(simArg)) && simArg;
+	bool wantTest = PE_parse_boot_argn("pwm-test", &testArg, sizeof(testArg)) && testArg;
+	if ((audioArg == 0 && !wantTest && !wantSim) || (provider->getProperty("sim-only") && !wantSim)) {
 		return false;
 	}
 	fRegMap = provider->mapDeviceMemoryWithIndex(0);

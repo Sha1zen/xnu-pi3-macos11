@@ -52,12 +52,11 @@ BCM2837DMA::start(IOService *provider)
 	if (!super::start(provider)) {
 		return false;
 	}
-	// Opt-in while audio is brought up (DARW-316): only audio=1 or the dma-test
-	// debug arg enables the controller; otherwise it is left as the firmware
-	// set it.
-	uint32_t optin = 0, testArg = 0;
-	if (!((PE_parse_boot_argn("audio", &optin, sizeof(optin)) && optin) ||
-	    (PE_parse_boot_argn("dma-test", &testArg, sizeof(testArg)) && testArg))) {
+	// On by default for audio; boot-arg audio=0 turns it off (dma-test=1
+	// still starts it, for the self-test).
+	uint32_t audioArg = 1, testArg = 0;
+	PE_parse_boot_argn("audio", &audioArg, sizeof(audioArg));
+	if (audioArg == 0 && !(PE_parse_boot_argn("dma-test", &testArg, sizeof(testArg)) && testArg)) {
 		return false;
 	}
 	fProvider = provider;

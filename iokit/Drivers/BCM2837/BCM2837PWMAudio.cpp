@@ -32,12 +32,12 @@ enum {
 bool
 BCM2837PWMAudioDevice::initHardware(IOService *provider)
 {
-	// Same opt-in as BCM2837PWM/BCM2837DMA (DARW-316): without audio=1 or
-	// pwm-sim=1 (e.g. only pwm-test=1 started the PWM block) the engine would
-	// wait for a DMA service that declined to start.
-	uint32_t optin = 0, sim = 0;
-	if (!((PE_parse_boot_argn("audio", &optin, sizeof(optin)) && optin) ||
-	    (PE_parse_boot_argn("pwm-sim", &sim, sizeof(sim)) && sim))) {
+	// Same switch as BCM2837PWM/BCM2837DMA: on unless audio=0 (pwm-sim=1
+	// keeps it on for QEMU). pwm-test=1 alone with audio=0 starts the PWM
+	// block but not this device, which would wait for a DMA that declined.
+	uint32_t audioArg = 1, sim = 0;
+	PE_parse_boot_argn("audio", &audioArg, sizeof(audioArg));
+	if (audioArg == 0 && !(PE_parse_boot_argn("pwm-sim", &sim, sizeof(sim)) && sim)) {
 		return false;
 	}
 	if (!super::initHardware(provider)) {

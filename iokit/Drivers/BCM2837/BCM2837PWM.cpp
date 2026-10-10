@@ -46,13 +46,15 @@ BCM2837PWM::start(IOService *provider)
 	if (!super::start(provider)) {
 		return false;
 	}
-	// Opt-in while audio is brought up (DARW-316): audio=1 (or the pwm-sim /
-	// pwm-test debug args) enables it; otherwise the block is left alone.
-	uint32_t optin = 0, simArg = 0, testArg = 0;
-	bool wanted = (PE_parse_boot_argn("audio", &optin, sizeof(optin)) && optin) ||
-	    (PE_parse_boot_argn("pwm-sim", &simArg, sizeof(simArg)) && simArg) ||
-	    (PE_parse_boot_argn("pwm-test", &testArg, sizeof(testArg)) && testArg);
-	if (!wanted) {
+	// Audio is on by default; boot-arg audio=0 turns it off (DARW-320). A node
+	// marked "sim-only" (devicetrees/rpi3-pwmtest.dts, for QEMU, which maps no
+	// PWM block) is only used with pwm-sim=1, since touching the registers
+	// there takes an external abort.
+	uint32_t audioArg = 1, simArg = 0, testArg = 0;
+	PE_parse_boot_argn("audio", &audioArg, sizeof(audioArg));
+	bool sim = PE_parse_boot_argn("pwm-sim", &simArg, sizeof(simArg)) && simArg;
+	bool test = PE_parse_boot_argn("pwm-test", &testArg, sizeof(testArg)) && testArg;
+	if ((audioArg == 0 && !test && !sim) || (provider->getProperty("sim-only") && !sim)) {
 		return false;
 	}
 	fRegMap = provider->mapDeviceMemoryWithIndex(0);

@@ -439,6 +439,7 @@ enum {
 	kBcm2837TagGetPitch       = 0x00040008,
 	kBcm2837TagGetPhysicalWH  = 0x00040003,
 	kBcm2837TagGetPixelOrder  = 0x00040006,
+	kBcm2837TagReleaseBuffer  = 0x00048001,
 	kBcm2837TagEnd            = 0,
 
 	/*
@@ -641,6 +642,29 @@ bcm2837_video_init(PE_Video *video)
 		}
 	}
 
+	/* Release whatever framebuffer the firmware already has (u-boot's,
+	 * drivers/video/bcm2835.c, set up at the display's native size with
+	 * BCM2835_MBOX_PIXEL_ORDER_RGB) so the allocation below is a fresh one
+	 * that applies our Set Pixel Order. When we ask for the same size the
+	 * firmware otherwise hands back u-boot's buffer unchanged, still RGB
+	 * (red in the low byte), and red/blue come out swapped: video_console.c
+	 * and Xorg write 0x00RRGGBB, which is the firmware's BGR order. Setting
+	 * the order again after allocation has no effect (tried, 60c6051e9).
+	 * Tag 0x00048001, no value bytes (u-boot mach/mbox.h:268
+	 * BCM2835_MBOX_TAG_RELEASE_BUFFER; QEMU bcm2835_property.c:159). */
+	{
+		static uint32_t sReleaseMsg[8] __attribute__((aligned(16)));
+		sReleaseMsg[0] = sizeof(sReleaseMsg);
+		sReleaseMsg[1] = 0;
+		sReleaseMsg[2] = kBcm2837TagReleaseBuffer;
+		sReleaseMsg[3] = 0;
+		sReleaseMsg[4] = 0;
+		sReleaseMsg[5] = kBcm2837TagEnd;
+		sReleaseMsg[6] = 0;
+		sReleaseMsg[7] = 0;
+		(void) bcm2837_mbox_call(mboxBase, sReleaseMsg);
+	}
+
 	b[kMsgIdxCode] = 0; /* RPI_FIRMWARE_STATUS_REQUEST */
 
 	b[kMsgIdxPhysWHTag] = kBcm2837TagSetPhysicalWH;
@@ -683,15 +707,9 @@ bcm2837_video_init(PE_Video *video)
 		return FALSE;
 	}
 
-	/* u-boot (drivers/video/bcm2835.c) already brought the display up at
-	 * its native size with BCM2835_MBOX_PIXEL_ORDER_RGB. Now that we ask
-	 * for that same size, the firmware can hand back that framebuffer
-	 * without applying our Set Pixel Order (a different size used to force
-	 * a fresh one), leaving RGB where video_console.c and Xorg's
-	 * 0xff0000 masks need BGR: red and blue swapped. Read the order back;
-	 * if it isn't BGR, set it again on its own. */
-	static uint32_t sOrderMsg[8] __attribute__((aligned(16)));
-	for (int attempt = 0; attempt < 2; attempt++) {
+	/* Read the order back for the boot log (0 = BGR is what we asked for). */
+	{
+		static uint32_t sOrderMsg[8] __attribute__((aligned(16)));
 		sOrderMsg[0] = sizeof(sOrderMsg);
 		sOrderMsg[1] = 0;
 		sOrderMsg[2] = kBcm2837TagGetPixelOrder;
@@ -700,23 +718,9 @@ bcm2837_video_init(PE_Video *video)
 		sOrderMsg[5] = 0xFFFFFFFF;
 		sOrderMsg[6] = kBcm2837TagEnd;
 		sOrderMsg[7] = 0;
-		if (!bcm2837_mbox_call(mboxBase, sOrderMsg)) {
-			break;
+		if (bcm2837_mbox_call(mboxBase, sOrderMsg)) {
+			kprintf("bcm2837_video_init: pixel order %u (0=BGR, wanted)\n", sOrderMsg[5]);
 		}
-		kprintf("bcm2837_video_init: pixel order %u (0=BGR)%s\n", sOrderMsg[5],
-		    sOrderMsg[5] == kBcm2837PixelOrderBGR ? "" : ", re-setting");
-		if (sOrderMsg[5] == kBcm2837PixelOrderBGR) {
-			break;
-		}
-		sOrderMsg[0] = sizeof(sOrderMsg);
-		sOrderMsg[1] = 0;
-		sOrderMsg[2] = kBcm2837TagSetPixelOrder;
-		sOrderMsg[3] = 4;
-		sOrderMsg[4] = 0;
-		sOrderMsg[5] = kBcm2837PixelOrderBGR;
-		sOrderMsg[6] = kBcm2837TagEnd;
-		sOrderMsg[7] = 0;
-		(void) bcm2837_mbox_call(mboxBase, sOrderMsg);
 	}
 
 	/* The returned bus address has one of the VC alias bits (0x40000000/

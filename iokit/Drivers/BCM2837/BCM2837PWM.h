@@ -63,6 +63,10 @@ public:
 	IOReturn startOutput();
 	void     stopOutput();
 	bool     isConfigured() const { return fRng != 0; }
+	// Changes the range (frame period) of a configured block, even while running
+	// (the new value applies from the next period). Used by the engine to trim the
+	// frame rate after measuring it.
+	IOReturn setRange(uint32_t rng);
 	// pwm-sim=1: registers live in RAM and no clock, pin or hardware is touched
 	// (QEMU has no PWM block). For exercising the audio path off-hardware.
 	bool     isSimulated() const { return fSim; }

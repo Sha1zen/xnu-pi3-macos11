@@ -287,6 +287,24 @@ BCM2837PWM::configureLocked(uint32_t rateHz, uint32_t *rngOut, uint32_t *actualR
 }
 
 IOReturn
+BCM2837PWM::setRange(uint32_t rng)
+{
+	if (rng < kPWMMinRange || rng > kPWMMaxRange) {
+		return kIOReturnBadArgument;
+	}
+	IOLockLock(fLock);
+	IOReturn r = kIOReturnNotReady;
+	if (fRng != 0) {
+		writeReg(0x10, rng);
+		writeReg(0x20, rng);
+		fRng = rng;
+		r = kIOReturnSuccess;
+	}
+	IOLockUnlock(fLock);
+	return r;
+}
+
+IOReturn
 BCM2837PWM::startOutput()
 {
 	IOLockLock(fLock);

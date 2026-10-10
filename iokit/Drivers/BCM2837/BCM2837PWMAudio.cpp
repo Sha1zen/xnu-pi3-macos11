@@ -78,6 +78,7 @@ BCM2837PWMAudioEngine::initHardware(IOService *provider)
 	fCbMem = NULL;
 	fCb = NULL;
 	fSimThreadRunning = 0;
+	fCalRange[0] = fCalRange[1] = 0;
 	fSimGen = 0;
 	fClipFrames = 0;
 	fClipPeak = 0;
@@ -402,6 +403,7 @@ BCM2837PWMAudioEngine::performAudioEngineStart()
 		return r;
 	}
 	takeTimeStamp(false);
+	calibrateRate();
 	// Bring-up (DARW-317): sample the DMA channel just before and just after the
 	// PWM is enabled, to see when and why it stops (audio-dbg=1).
 	uint32_t dbg = 0;
@@ -807,4 +809,74 @@ BCM2837PWMAudioEngine::toneTestRun()
 	}
 	setRunEraseHead(hadErase);
 	IOLog("BCM2837PWMAudio: audio-test: done\n");
+}
+
+// The frame rate the PWM really runs at is not clock / RANGE as computed from
+// the clock manager settings: measured on a real Pi 3 (DARW-317) the DMA ring
+// completed at about 63% of that, at both a /5 and a /10 divisor (so the clock
+// manager does control the PWM, but with a constant factor I could not explain
+// from the documents available here). Rather than hard-code a factor, measure
+// it: with the PWM running, watch how fast the DMA's source address moves
+// round the ring, and trim the range so the frame rate matches the one
+// asked for. Frame rate is proportional to 1 / RANGE, so one correction is
+// enough; the result is cached per sample rate.
+void
+BCM2837PWMAudioEngine::calibrateRate()
+{
+	if (fSim || !fHaveChannel) {
+		return;
+	}
+	const uint32_t idx = fRate == 44100 ? 0 : 1;
+	if (fCalRange[idx] != 0) {
+		if (fCalRange[idx] != fRng && fPWM->setRange(fCalRange[idx]) == kIOReturnSuccess) {
+			fRng = fCalRange[idx];
+			fillRingMidScale(0, kPWMAudioFrames);
+		}
+		return;
+	}
+	const uint32_t ringBytes = kPWMAudioFrames * kBytesPerRingFrame;
+	uint64_t frames = 0, spanTicks = 0;
+	uint32_t prevPos = 0;
+	uint64_t prevT = 0;
+	bool have = false;
+	IOSleep(5);
+	for (int i = 0; i < 40; i++) {
+		uint32_t src = fDMA->readChannelReg(fChannel, kRegSourceAd);
+		uint64_t now = mach_absolute_time();
+		if (src >= fRingBus && src < fRingBus + ringBytes) {
+			uint32_t pos = (src - fRingBus) / kBytesPerRingFrame;
+			if (have) {
+				uint32_t d = (pos + kPWMAudioFrames - prevPos) % kPWMAudioFrames;
+				// ~10 ms apart is ~480 frames; a glitched read shows up as an
+				// implausible step and is skipped (its time is not counted).
+				if (d <= 1500) {
+					frames += d;
+					spanTicks += now - prevT;
+				}
+			}
+			prevPos = pos;
+			prevT = now;
+			have = true;
+		}
+		IOSleep(10);
+	}
+	uint64_t ns = 0;
+	absolutetime_to_nanoseconds(spanTicks, &ns);
+	if (frames < 4000 || ns < 100000000ULL) {
+		IOLog("BCM2837PWMAudio: rate calibration: not enough data (%llu frames in %llu ms), keeping range %u\n",
+		    frames, ns / 1000000, fRng);
+		return;
+	}
+	uint64_t measured = frames * 1000000000ULL / ns;       // frames per second
+	uint32_t newRng = (uint32_t)(((uint64_t)fRng * measured + fRate / 2) / fRate);
+	IOLog("BCM2837PWMAudio: rate calibration: measured %llu frames/s at range %u (wanted %u); new range %u\n",
+	    measured, fRng, fRate, newRng);
+	if (newRng >= kPWMMinRange && newRng <= kPWMMaxRange && newRng != fRng &&
+	    fPWM->setRange(newRng) == kIOReturnSuccess) {
+		fRng = newRng;
+		fillRingMidScale(0, kPWMAudioFrames);
+		fCalRange[idx] = newRng;
+	} else {
+		fCalRange[idx] = fRng;
+	}
 }

@@ -163,7 +163,13 @@ BCM2837PWM::programClock()
 	}
 	bool ok = !(*ctl & kBusy);
 	if (ok) {
-		*div = kPw | (kPWMClockDivisor << 12);          // integer divide, DIVF = 0
+		// pwm-div=<n> overrides the divisor (bring-up experiment, DARW-317).
+		uint32_t divisor = kPWMClockDivisor, dArg = 0;
+		if (PE_parse_boot_argn("pwm-div", &dArg, sizeof(dArg)) && dArg >= 2 && dArg < 4096) {
+			divisor = dArg;
+			IOLog("BCM2837PWM: pwm-div=%u override (%u Hz)\n", divisor, kPWMPllDHz / divisor);
+		}
+		*div = kPw | (divisor << 12);                   // integer divide, DIVF = 0
 		*ctl = kPw | kSrcPllD;                          // source PLLD, MASH off
 		IODelay(10);
 		*ctl = kPw | kSrcPllD | kEnab;

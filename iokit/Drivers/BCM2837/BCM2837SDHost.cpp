@@ -605,6 +605,87 @@ BCM2837SDHost::waitWriteDrained(void)
 }
 
 bool
+BCM2837SDHost::writeSelfTest(void)
+{
+	// Real-hardware check of the write path before the root disk is trusted
+	// to it (the FIFO-drain bug above passed every QEMU test and only showed
+	// up as a corrupted HFS catalog on a real card). Writes patterns to
+	// blocks past the end of the last MBR partition, reads them back from
+	// the card (this driver has no cache, so a read is a card read), and
+	// compares. Never touches a partition; skipped if there is no room.
+	const uint32_t kMaxRun = 256;
+	uint8_t *mbr = (uint8_t *)IOMalloc(512);
+	uint8_t *wbuf = (uint8_t *)IOMalloc(kMaxRun * 512);
+	uint8_t *rbuf = (uint8_t *)IOMalloc(kMaxRun * 512);
+	bool ok = (mbr != NULL && wbuf != NULL && rbuf != NULL) && readBlocks(0, 1, mbr);
+	uint64_t lastEnd = 0;
+	if (ok) {
+		for (int i = 0; i < 4; i++) {
+			const uint8_t *e = mbr + 446 + i * 16;
+			uint64_t start = e[8] | e[9] << 8 | e[10] << 16 | (uint64_t)e[11] << 24;
+			uint64_t count = e[12] | e[13] << 8 | e[14] << 16 | (uint64_t)e[15] << 24;
+			if (e[4] != 0 && start + count > lastEnd) {
+				lastEnd = start + count;
+			}
+		}
+	}
+	// Runs chosen to cover single-block CMD24, short and odd CMD25 runs,
+	// and a full 256-block chunk (the size doAsyncReadWrite() splits into,
+	// where the bug corrupted the tail).
+	static const uint32_t runs[] = { 1, 2, 7, 64, 255, 256, 256 };
+	uint64_t base = lastEnd + 2048;   // 1 MiB clear of the last partition
+	uint64_t need = 0;
+	for (uint32_t r : runs) {
+		need += r;
+	}
+	if (ok && (lastEnd == 0 || base + need > fBlockCount)) {
+		IOLog("BCM2837SDHost: write self-test skipped (no free space after the partitions)\n");
+		goto out;
+	}
+	if (ok) {
+		uint32_t seed = (uint32_t)mach_absolute_time();
+		uint64_t lba = base;
+		for (uint32_t r : runs) {
+			uint32_t *w = (uint32_t *)wbuf;
+			for (uint32_t i = 0; i < r * 128; i++) {
+				seed = seed * 1664525 + 1013904223;   // LCG, a different pattern every boot
+				w[i] = seed ^ (uint32_t)(lba * 128 + i);
+			}
+			bzero(rbuf, r * 512);
+			if (!writeBlocks(lba, r, wbuf) || !readBlocks(lba, r, rbuf)) {
+				IOLog("BCM2837SDHost: write self-test: I/O failed for %u blocks at %llu\n", r, lba);
+				ok = false;
+				break;
+			}
+			if (memcmp(wbuf, rbuf, r * 512) != 0) {
+				uint32_t first = 0, bad = 0;
+				for (uint32_t i = 0; i < r * 512; i++) {
+					if (wbuf[i] != rbuf[i]) {
+						if (bad++ == 0) {
+							first = i;
+						}
+					}
+				}
+				IOLog("BCM2837SDHost: write self-test: %u blocks at %llu read back %u wrong bytes, first at offset %u\n",
+				    r, lba, bad, first);
+				ok = false;
+				break;
+			}
+			lba += r;
+		}
+		if (ok) {
+			IOLog("BCM2837SDHost: write self-test passed (%llu blocks at %llu, past the last partition)\n",
+			    need, base);
+		}
+	}
+out:
+	if (mbr) IOFree(mbr, 512);
+	if (wbuf) IOFree(wbuf, kMaxRun * 512);
+	if (rbuf) IOFree(rbuf, kMaxRun * 512);
+	return ok;
+}
+
+bool
 BCM2837SDHost::writeBlocks(uint64_t start, uint32_t n, const void *buf)
 {
 	uint32_t arg = fCardIsSDHC ? (uint32_t)start : (uint32_t)(start * fBlockSize);
@@ -696,6 +777,13 @@ BCM2837SDHost::start(IOService *provider)
 	PE_parse_boot_argn("sdhost-fail-test", &failTest, sizeof(failTest));
 
 	bool ok = (failTest == 0) && cardIdentify();
+
+	uint32_t writeTest = 0;
+	PE_parse_boot_argn("sdhost-write-test", &writeTest, sizeof(writeTest));
+	if (ok && writeTest != 0 && !writeSelfTest()) {
+		IOLog("BCM2837SDHost: write self-test FAILED - not using sdhost for the root disk\n");
+		ok = false;
+	}
 	if (!ok) {
 		if (failTest != 0) {
 			IOLog("BCM2837SDHost: sdhost-fail-test=1 - pretending card init failed\n");

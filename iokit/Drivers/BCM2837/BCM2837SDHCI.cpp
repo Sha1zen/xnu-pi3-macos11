@@ -1,5 +1,6 @@
 #include "BCM2837SDHCI.h"
 #include "BCM2837Mailbox.h"
+#include "BCM2837SDCardOwner.h"
 
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
@@ -1352,20 +1353,40 @@ BCM2837SDHCI::waitForCardHostVerdict(void)
 	// "sdhost" or "sdhci" on every path once it has run. If it never runs
 	// (old DTB without an "sdhost" node, driver failed to match) the wait
 	// times out and the card stays here.
-	OSDictionary *match = IOService::resourceMatching("BCM2837SDCardHost");
-	if (match == NULL) {
-		return "sdhci";
+	//
+	// Ownership itself is decided by BCM2837SDCardOwner's compare-and-swap,
+	// not by the timeout: on timeout this claims the card, and only if
+	// sdhost has not already claimed it. If sdhost has, its verdict is on
+	// the way (it publishes on every path after claiming), so keep waiting.
+	// resourceMatching() matches on the key's presence only
+	// (IOService.cpp resourceMatching()), hence the value check below.
+	uint64_t timeout = 15ULL * kSecondScale;
+	for (int round = 0; round < 8; round++) {
+		OSDictionary *match = IOService::resourceMatching("BCM2837SDCardHost");
+		if (match == NULL) {
+			break;
+		}
+		IOService *res = IOService::waitForMatchingService(match, timeout);
+		match->release();
+		if (res != NULL) {
+			OSString *val = OSDynamicCast(OSString, res->getProperty("BCM2837SDCardHost"));
+			bool onSDHost = (val != NULL && val->isEqualTo("sdhost"));
+			res->release();
+			return onSDHost ? "sdhost" : "sdhci";
+		}
+		if (BCM2837SDCardOwner::claim(BCM2837SDCardOwner::kOwnerSDHCI)) {
+			IOLog("BCM2837SDHCI: no sdhost verdict within 15 s - taking the SD card\n");
+			return "sdhci";
+		}
+		if (BCM2837SDCardOwner::owner() == BCM2837SDCardOwner::kOwnerSDHCI) {
+			return "sdhci"; // sdhost handed it back; its verdict is just late
+		}
+		IOLog("BCM2837SDHCI: sdhost owns the SD card but has not finished - waiting\n");
 	}
-	IOService *res = IOService::waitForMatchingService(match, 15ULL * kSecondScale);
-	match->release();
-	if (res == NULL) {
-		IOLog("BCM2837SDHCI: no sdhost verdict within 15 s\n");
-		return "sdhci";
-	}
-	OSString *val = OSDynamicCast(OSString, res->getProperty("BCM2837SDCardHost"));
-	const char *host = (val != NULL && val->isEqualTo("sdhost")) ? "sdhost" : "sdhci";
-	res->release();
-	return host;
+	// sdhost claimed the card and never finished within ~2 minutes. The
+	// pins are its; touching them now could corrupt the card.
+	IOLog("BCM2837SDHCI: sdhost never reported - leaving the SD card alone\n");
+	return "sdhost";
 }
 
 bool

@@ -1,6 +1,7 @@
 #include "BCM2837SDHost.h"
 #include "BCM2837Mailbox.h"
 #include "BCM2837GPIO.h"
+#include "BCM2837SDCardOwner.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/storage/IOMedia.h>
@@ -637,6 +638,17 @@ BCM2837SDHost::start(IOService *provider)
 		fCoreClockHz = kFallbackCoreHz;
 	}
 
+	// Claim the card before touching GPIO48-53 (BCM2837SDCardOwner.h): if
+	// BCM2837SDHCI already timed out waiting for us and took it, stay off
+	// the pins entirely.
+	if (!BCM2837SDCardOwner::claim(BCM2837SDCardOwner::kOwnerSDHost)) {
+		IOLog("BCM2837SDHost: the Arasan controller already owns the SD card - not starting\n");
+		fRegMap->release();
+		fRegMap = NULL;
+		fRegBase = NULL;
+		return false;
+	}
+
 	pinmux(true);
 	resetHost();
 	setClock(kIdentClockHz);
@@ -653,6 +665,7 @@ BCM2837SDHost::start(IOService *provider)
 		IOLog("BCM2837SDHost: card init failed - handing GPIO48-53 back to the Arasan controller\n");
 		writeReg(kRegVdd, 0);
 		pinmux(false);
+		BCM2837SDCardOwner::handBack();
 		publishVerdict("sdhci");
 		fRegMap->release();
 		fRegMap = NULL;

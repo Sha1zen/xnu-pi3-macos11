@@ -579,6 +579,32 @@ BCM2837SDHost::readBlocks(uint64_t start, uint32_t n, void *buf)
 }
 
 bool
+BCM2837SDHost::waitWriteDrained(void)
+{
+	for (uint32_t ms = 0; ms < 1000; ) {
+		for (int spin = 0; spin < 1000; spin++) {
+			uint32_t edm = readReg(kRegEdm);
+			uint32_t level = (edm >> 4) & 0x1f;
+			uint32_t fsm = edm & kEdmFsmMask;
+			if (level == 0 && (fsm == kFsmWriteStart1 || fsm == kFsmDataMode || fsm == kFsmIdentMode)) {
+				return true;
+			}
+			uint32_t hsts = readReg(kRegHsts);
+			if (hsts & kHstsErrorMask) {
+				IOLog("BCM2837SDHost: write error while draining, HSTS %#x EDM %#x\n", hsts, edm);
+				writeReg(kRegHsts, kHstsErrorMask);
+				return false;
+			}
+			IODelay(1);
+		}
+		IOSleep(1);
+		ms++;
+	}
+	dumpRegs("write never drained");
+	return false;
+}
+
+bool
 BCM2837SDHost::writeBlocks(uint64_t start, uint32_t n, const void *buf)
 {
 	uint32_t arg = fCardIsSDHC ? (uint32_t)start : (uint32_t)(start * fBlockSize);
@@ -587,6 +613,18 @@ BCM2837SDHost::writeBlocks(uint64_t start, uint32_t n, const void *buf)
 		return false;
 	}
 	bool ok = pioTransfer(false, (uint32_t *)(uintptr_t)buf, n * (fBlockSize / 4));
+	// The last words are still in the 16-word FIFO when pioTransfer()
+	// returns. Sending CMD12 then cut off the tail of every multi-block
+	// write on a real Pi (QEMU drains instantly): the last bytes of each
+	// 256-block chunk reached the card wrong and the HFS catalog was
+	// corrupted. Linux ends a PIO write only on the block interrupt for the
+	// final block (bcm2835_block_irq() -> bcm2835_finish_data()), i.e. once
+	// the block has gone out with its CRC status. Polled equivalent: FIFO
+	// empty and the FSM out of the write-data/CRC/busy states, parked in
+	// WRITESTART1 (waiting for a next block) or back in DATAMODE.
+	if (ok && !waitWriteDrained()) {
+		ok = false;
+	}
 	// bcm2835_transfer_complete(): an open-ended multi-block write is ended
 	// with CMD12 (R1b); a single block waits for the FSM to come back to
 	// idle (WRITESTART1 = finished and parked).

@@ -5,6 +5,7 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/storage/IOMedia.h>
 #include <libkern/OSByteOrder.h>
+#include <pexpert/pexpert.h>
 #include <string.h>
 
 #define super IOBlockStorageDevice
@@ -1338,6 +1339,36 @@ BCM2837SDHCI::cardIdentify(void)
 }
 
 bool
+BCM2837SDHCI::wifiModeEnabled(void)
+{
+	uint32_t wifi = 0;
+	return PE_parse_boot_argn("wifi", &wifi, sizeof(wifi)) && wifi != 0;
+}
+
+const char *
+BCM2837SDHCI::waitForCardHostVerdict(void)
+{
+	// BCM2837SDHost::start() publishes resource "BCM2837SDCardHost" with
+	// "sdhost" or "sdhci" on every path once it has run. If it never runs
+	// (old DTB without an "sdhost" node, driver failed to match) the wait
+	// times out and the card stays here.
+	OSDictionary *match = IOService::resourceMatching("BCM2837SDCardHost");
+	if (match == NULL) {
+		return "sdhci";
+	}
+	IOService *res = IOService::waitForMatchingService(match, 15ULL * kSecondScale);
+	match->release();
+	if (res == NULL) {
+		IOLog("BCM2837SDHCI: no sdhost verdict within 15 s\n");
+		return "sdhci";
+	}
+	OSString *val = OSDynamicCast(OSString, res->getProperty("BCM2837SDCardHost"));
+	const char *host = (val != NULL && val->isEqualTo("sdhost")) ? "sdhost" : "sdhci";
+	res->release();
+	return host;
+}
+
+bool
 BCM2837SDHCI::start(IOService *provider)
 {
 	if (!super::start(provider)) {
@@ -1350,6 +1381,23 @@ BCM2837SDHCI::start(IOService *provider)
 		return false;
 	}
 	fRegBase = (volatile void *)fRegMap->getVirtualAddress();
+
+	// docs/wifi-plan.md: with boot-arg wifi=1 the SD card belongs to
+	// BCM2837SDHost (GPIO48-53 ALT0) unless that driver reports it could not
+	// bring the card up. Nothing below may touch GPIO48-53 or the card
+	// before that verdict is in.
+	if (wifiModeEnabled()) {
+		if (strcmp(waitForCardHostVerdict(), "sdhost") == 0) {
+			IOLog("BCM2837SDHCI: wifi=1 and the SD card is on sdhost - "
+			    "Arasan controller left for SDIO\n");
+			fRegMap->release();
+			fRegMap = NULL;
+			fRegBase = NULL;
+			return false;
+		}
+		IOLog("BCM2837SDHCI: wifi=1 but sdhost does not have the card - "
+		    "driving the SD card from the Arasan controller as before\n");
+	}
 
 	// Real-hardware correctness only - confirmed NOT required for QEMU
 	// (see pinmuxSDSlot()'s own comment) - failure here isn't fatal to

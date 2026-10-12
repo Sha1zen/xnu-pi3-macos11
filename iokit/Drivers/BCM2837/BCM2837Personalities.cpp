@@ -519,6 +519,10 @@ BCM2837RegisterBuiltinPersonalities(void)
 	OSDictionary *armio = makePersonality("IOPlatformDevice", "BCM2837ArmIO", "arm-io", -1);
 	OSDictionary *intc = makePersonality("IOPlatformDevice", "BCM2837InterruptController", "intc", -1);
 	OSDictionary *sdhci = makePersonality("IOPlatformDevice", "BCM2837SDHCI", "sdhci", -1);
+	// "sdhost" - the second SD controller. BCM2837SDHost::probe() declines
+	// unless boot-arg wifi=1, which moves the SD card there so "sdhci" can
+	// drive the WiFi chip (docs/wifi-plan.md).
+	OSDictionary *sdhost = makePersonality("IOPlatformDevice", "BCM2837SDHost", "sdhost", -1);
 	// "dma" - the DMA controller (DARW-313), used by the audio engine.
 	OSDictionary *dma = makePersonality("IOPlatformDevice", "BCM2837DMA", "dma", -1);
 	// "pwm" - the PWM block, the 3.5mm audio jack (DARW-314). The DT node is
@@ -697,6 +701,10 @@ BCM2837RegisterBuiltinPersonalities(void)
 	if (sdhci != NULL) {
 		personalities->setObject(sdhci);
 		sdhci->release();
+	}
+	if (sdhost != NULL) {
+		personalities->setObject(sdhost);
+		sdhost->release();
 	}
 	if (dma != NULL) {
 		personalities->setObject(dma);

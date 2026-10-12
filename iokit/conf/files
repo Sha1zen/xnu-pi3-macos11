@@ -60,6 +60,10 @@ iokit/Network/IONetworkUserClient.cpp			optional iokitcpp
 
 iokit/Drivers/BCM2837/BCM2837InterruptController.cpp	optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837SDHCI.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837SDHost.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM2837SDIODevice.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM43430Wifi.cpp			optional iokitcpp
+iokit/Drivers/BCM2837/BCM43430WifiUserClient.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837DMA.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PWM.cpp			optional iokitcpp
 iokit/Drivers/BCM2837/BCM2837PWMAudio.cpp			optional iokitcpp

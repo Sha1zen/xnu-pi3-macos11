@@ -586,6 +586,16 @@ BCM2837Mailbox::setClockState(uint32_t clockId, bool on)
 }
 
 bool
+BCM2837Mailbox::setExpGPIO(unsigned line, bool high)
+{
+	uint32_t resp = 0, status = ~0U, state = 0;
+	if (!propertyTag2(0x00038041, 128 + line, high ? 1 : 0, &resp, &status, &state)) {
+		return false;
+	}
+	return (resp & (1U << 31)) != 0 && status == 0;
+}
+
+bool
 BCM2837Mailbox::propertyTag2(uint32_t tag, uint32_t a, uint32_t b,
     uint32_t *respCode, uint32_t *ra, uint32_t *rb)
 {

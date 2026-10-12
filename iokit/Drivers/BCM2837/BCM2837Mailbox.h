@@ -135,6 +135,16 @@ public:
 	    uint32_t *respCode, uint32_t *ra, uint32_t *rb);
 
 	/*
+	 * Drives one of the firmware's expander GPIOs (property tag 0x00038041,
+	 * RPI_FIRMWARE_SET_GPIO_STATE; Linux drivers/gpio/gpio-raspberrypi-exp.c,
+	 * RPI_EXP_GPIO_BASE 128). On the Pi 3B line 0 is BT_ON and 1 is WL_ON
+	 * (bcm2837-rpi-3-b.dts gpio-line-names). The firmware overwrites the
+	 * request's first word with a status, 0 = success
+	 * (rpi_exp_gpio_set(): `if (ret || set.gpio != 0)` is failure).
+	 */
+	static bool setExpGPIO(unsigned line, bool high);
+
+	/*
 	 * The VideoCore's 64-bit per-board serial number (property tag
 	 * 0x00010004). Returns false if the mailbox call fails or the
 	 * firmware returns zero - the latter is a real, expected case under

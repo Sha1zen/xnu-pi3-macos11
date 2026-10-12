@@ -135,12 +135,19 @@ public:
 	    uint32_t *respCode, uint32_t *ra, uint32_t *rb);
 
 	/*
-	 * Drives one of the firmware's expander GPIOs (property tag 0x00038041,
-	 * RPI_FIRMWARE_SET_GPIO_STATE; Linux drivers/gpio/gpio-raspberrypi-exp.c,
-	 * RPI_EXP_GPIO_BASE 128). On the Pi 3B line 0 is BT_ON and 1 is WL_ON
-	 * (bcm2837-rpi-3-b.dts gpio-line-names). The firmware overwrites the
-	 * request's first word with a status, 0 = success
-	 * (rpi_exp_gpio_set(): `if (ret || set.gpio != 0)` is failure).
+	 * One property tag with an n-word value buffer (n <= 8), sent and
+	 * returned in place. Returns true if the mailbox call completed;
+	 * *respCode is the tag's response word (bit 31 = answered).
+	 */
+	static bool propertyTagWords(uint32_t tag, uint32_t *words, unsigned n, uint32_t *respCode);
+
+	/*
+	 * Drives one of the firmware's expander GPIOs as an output, the way
+	 * Linux drivers/gpio/gpio-raspberrypi-exp.c rpi_exp_gpio_dir_out() does
+	 * (property tags 0x00030043 GET_GPIO_CONFIG and 0x00038043
+	 * SET_GPIO_CONFIG; RPI_EXP_GPIO_BASE 128). On the Pi 3B line 0 is BT_ON
+	 * and 1 is WL_ON (bcm2837-rpi-3-b.dts gpio-line-names). The firmware
+	 * overwrites the first request word with a status, 0 = success.
 	 */
 	static bool setExpGPIO(unsigned line, bool high);
 

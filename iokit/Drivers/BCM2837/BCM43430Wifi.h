@@ -98,6 +98,7 @@ private:
 
 	// SDPCM.
 	uint8_t fTxSeq, fTxWindow, fFcMask;
+	volatile bool fCtlWaiting;   // a control frame waits for credit; data leaves 2 (brcmfmac TXCTL_CREDITS)
 	uint16_t fReqId;
 	uint8_t *fRxBuf;             // threadMain only
 	uint8_t *fCmdBuf;            // under fCmdLock

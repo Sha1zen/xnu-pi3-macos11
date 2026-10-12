@@ -29,7 +29,7 @@
 #include <IOKit/network/IOEthernetController.h>
 #include <IOKit/network/IOEthernetInterface.h>
 #include <IOKit/network/IONetworkMedium.h>
-#include <IOKit/network/IOOutputQueue.h>
+#include <IOKit/network/IOBasicOutputQueue.h>
 #include <IOKit/IOLocks.h>
 #include <kern/thread.h>
 
@@ -51,6 +51,7 @@ public:
 	virtual IOReturn enable(IONetworkInterface *netif) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn disable(IONetworkInterface *netif) APPLE_KEXT_OVERRIDE;
 	virtual UInt32   outputPacket(mbuf_t m, void *param) APPLE_KEXT_OVERRIDE;
+	virtual IOOutputQueue *createOutputQueue(void) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setMulticastMode(bool active) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setMulticastList(IOEthernetAddress *addrs, UInt32 count) APPLE_KEXT_OVERRIDE;
@@ -128,6 +129,7 @@ private:
 	TxSlot *fTxRing;
 	uint32_t fTxHead, fTxTail;
 	uint32_t fTxDrops;
+	volatile bool fTxStalled;    // outputPacket() returned Stall; restart the queue when a slot frees
 
 	// SDIO / backplane primitives (callers hold fBusLock).
 	bool cfgw(uint32_t off, uint8_t v);

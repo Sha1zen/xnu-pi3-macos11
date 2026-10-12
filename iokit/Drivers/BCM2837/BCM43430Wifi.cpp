@@ -166,6 +166,7 @@ BCM43430Wifi::init(OSDictionary *properties)
 	bzero(fBssid, sizeof(fBssid));
 	fScanning = fScanDone = false;
 	fTxHead = fTxTail = fTxDrops = 0;
+	fTxStalled = false;
 
 	fBusLock = IOLockAlloc();
 	fEventLock = IOLockAlloc();
@@ -1202,6 +1203,13 @@ BCM43430Wifi::threadMain(void)
 				}
 			}
 			transmitPending();
+			if (fTxStalled && (fTxHead - fTxTail) < kTxSlots) {
+				fTxStalled = false;
+				IOOutputQueue *q = getOutputQueue();
+				if (q != NULL) {
+					q->service(IOBasicOutputQueue::kServiceAsync);
+				}
+			}
 			fSDIO->enableCardInterrupt(true);
 		}
 
@@ -1697,6 +1705,11 @@ IOReturn
 BCM43430Wifi::enable(IONetworkInterface *)
 {
 	fNetifEnabled = true;
+	IOOutputQueue *q = getOutputQueue();
+	if (q != NULL) {
+		q->setCapacity(256);
+		q->start();
+	}
 	updateLink();
 	return kIOReturnSuccess;
 }
@@ -1705,7 +1718,25 @@ IOReturn
 BCM43430Wifi::disable(IONetworkInterface *)
 {
 	fNetifEnabled = false;
+	IOOutputQueue *q = getOutputQueue();
+	if (q != NULL) {
+		q->stop();
+		q->flush();
+	}
 	return kIOReturnSuccess;
+}
+
+IOOutputQueue *
+BCM43430Wifi::createOutputQueue(void)
+{
+	// A real output queue, so a full TX ring is back-pressure (Stall) and
+	// not a drop: in this port kIOReturnOutputDropped (1) reaches userland
+	// as errno 1, EPERM (DAR-326) - an ssh push died with "Operation not
+	// permitted" on the first burst that filled the ring. IOBasicOutputQueue
+	// calls outputPacket() from its own serialized context; threadMain calls
+	// service() once a slot frees (AppleUSBCDCECMData does the same with
+	// its gated queue).
+	return IOBasicOutputQueue::withTarget(this, 256);
 }
 
 UInt32
@@ -1713,22 +1744,26 @@ BCM43430Wifi::outputPacket(mbuf_t m, void *)
 {
 	size_t len = mbuf_pkthdr_len(m);
 	if (fState != kWifiStateUp || !fAssociated || len < 14 || len > kTxSlotBytes) {
+		// Nowhere to send it. Dropped quietly, not reported as Dropped, for
+		// the EPERM reason above (an Ethernet driver with no link drops the
+		// same way).
+		fTxDrops++;
 		freePacket(m);
-		return kIOReturnOutputDropped;
+		return kIOReturnOutputSuccess;
 	}
 	IOInterruptState st = IOSimpleLockLockDisableInterrupt(fTxLock);
 	bool full = (fTxHead - fTxTail) >= kTxSlots;
+	if (full) {
+		fTxStalled = true;
+	}
 	TxSlot *slot = full ? NULL : &fTxRing[fTxHead % kTxSlots];
 	IOSimpleLockUnlockEnableInterrupt(fTxLock, st);
 	if (slot == NULL) {
-		fTxDrops++;
-		freePacket(m);
-		return kIOReturnOutputDropped;
+		wakeThread();
+		return kIOReturnOutputStall;     // the queue keeps m and retries after service()
 	}
-	// Copy outside the spinlock: only this producer touches fTxHead's slot
-	// until fTxHead is advanced below. outputPacket() is not re-entered
-	// concurrently for one interface (no output queue: the interface's
-	// output path calls it under its own serialization).
+	// Single producer: the output queue serializes outputPacket(), and only
+	// it advances fTxHead, so the slot is ours until fTxHead moves.
 	mbuf_copydata(m, 0, len, slot->data);
 	slot->len = (uint32_t)len;
 	freePacket(m);

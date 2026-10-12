@@ -141,6 +141,7 @@ BCM43430Wifi::init(OSDictionary *properties)
 	fThread = NULL;
 	fWake = fCardIrq = false;
 	fNetif = NULL;
+	fNetStats = NULL;
 	fMedium = NULL;
 	fNetifEnabled = false;
 	fState = kWifiStateNone;
@@ -1146,6 +1147,13 @@ BCM43430Wifi::transmitPending(void)
 		if (!ok) {
 			fTxDrops++;
 		}
+		if (fNetStats != NULL) {
+			if (ok) {
+				fNetStats->outputPackets++;
+			} else {
+				fNetStats->outputErrors++;
+			}
+		}
 	}
 }
 
@@ -1652,8 +1660,10 @@ BCM43430Wifi::getStatus(wifi_status *out)
 	strlcpy(out->fwversion, fFwVersion, sizeof(out->fwversion));
 	strlcpy(out->lasterror, fLastError, sizeof(out->lasterror));
 	if (out->associated) {
-		// scb_val_t {le32 val; u8 ea[6]}
-		uint8_t scb[10];
+		// brcmfmac fwil_types.h brcmf_scb_val_le {__le32 val; u8 ea[6]},
+		// not packed, so sizeof is 12; the firmware rejects 10 bytes with
+		// BCME_BADARG (-2), seen on real hardware.
+		uint8_t scb[12];
 		bzero(scb, sizeof(scb));
 		if (wlcmd(WLC_GET_RSSI, false, scb, sizeof(scb), scb, sizeof(scb)) == kIOReturnSuccess) {
 			out->rssi = (int32_t)get4(scb);
@@ -1724,6 +1734,20 @@ BCM43430Wifi::disable(IONetworkInterface *)
 		q->flush();
 	}
 	return kIOReturnSuccess;
+}
+
+bool
+BCM43430Wifi::configureInterface(IONetworkInterface *netif)
+{
+	if (!IOEthernetController::configureInterface(netif)) {
+		return false;
+	}
+	// As AppleUSBCDCECMData::configureInterface() does
+	// (AppleUSBCDCECMData.cpp:1802): keep a pointer to the interface's
+	// IONetworkStats buffer and count output in the driver.
+	IONetworkData *nd = netif->getNetworkData(kIONetworkStatsKey);
+	fNetStats = nd != NULL ? (IONetworkStats *)nd->getBuffer() : NULL;
+	return true;
 }
 
 IOOutputQueue *

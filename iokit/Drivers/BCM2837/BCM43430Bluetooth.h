@@ -81,8 +81,8 @@ private:
 	uint8_t *fRing;
 	volatile uint32_t fRingHead;     // written by interruptOccurred() only
 	volatile uint32_t fRingTail;     // written by the worker only
-	volatile uint32_t fRingFlush;    // worker drops everything up to here (set by flushRx)
-	volatile bool fFlushPending;     // flushRx() asked; the worker clears it once done
+	volatile bool fFlushPending;     // flushRx() asked; the worker drops everything up to the head
+	volatile uint32_t fRxBadAt;      // ring position just past a byte with a DR error flag
 
 	// H4 deframer (worker only).
 	uint8_t fPkt[2 + kBtPacketMax];

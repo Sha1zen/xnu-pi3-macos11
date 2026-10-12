@@ -81,7 +81,7 @@ BCM43430Bluetooth::init(OSDictionary *properties)
 	fLastError[0] = 0;
 	fPatch = NULL;
 	fPatchLen = 0;
-	fRingHead = fRingTail = fRingFlush = 0;
+	fRingHead = fRingTail = fRxBadAt = 0;
 	fFlushPending = false;
 	fPktType = fPktHave = fPktNeed = 0;
 	fPktInHeader = false;
@@ -156,11 +156,14 @@ BCM43430Bluetooth::start(IOService *provider)
 	}
 	if (r != kIOReturnSuccess) {
 		IOLog("BCM43430Bluetooth: interrupt setup failed, %#x\n", r);
+		provider->unregisterInterrupt(0);
 		return false;
 	}
 
 	if (kernel_thread_start(&BCM43430Bluetooth::threadEntry, this, &fThread) != KERN_SUCCESS) {
 		IOLog("BCM43430Bluetooth: could not start the worker thread\n");
+		provider->disableInterrupt(0);
+		provider->unregisterInterrupt(0);
 		return false;
 	}
 	thread_deallocate(fThread);
@@ -219,6 +222,9 @@ BCM43430Bluetooth::uartInit(uint32_t baud)
 	writeReg(kRegIFLS, kIflsRx4_8Tx4_8);
 	uartSetBaud(baud);
 	writeReg(kRegCR, kCrUARTEN | kCrTXE | kCrRXE);
+	// RX + RT as Linux (pl011_startup), plus the error interrupts so an
+	// overrun is counted even when it arrives with no data to drain
+	// (project choice: they only count and are cleared through ICR).
 	writeReg(kRegIMSC, kIntRX | kIntRT | kIntErrors);
 }
 
@@ -245,7 +251,7 @@ BCM43430Bluetooth::interruptOccurred(OSObject *target, void *, IOService *, int)
 	// drain can strand bytes.
 	BCM43430Bluetooth *self = (BCM43430Bluetooth *)target;
 	bool got = false;
-	for (int pass = 0; pass < 64; pass++) {
+	for (int pass = 0; pass < 256; pass++) {    // AMBA_ISR_PASS_LIMIT, amba-pl011.c:51
 		uint32_t mis = self->readReg(kRegMIS);
 		if (mis == 0) {
 			break;
@@ -263,6 +269,12 @@ BCM43430Bluetooth::interruptOccurred(OSObject *target, void *, IOService *, int)
 			}
 			if (d & (kDrFE | kDrPE | kDrBE)) {
 				self->fRxErrors++;
+			}
+			if (d & (kDrOE | kDrFE | kDrPE | kDrBE)) {
+				// The packet being received has lost or bad bytes: make the
+				// deframer drop it at this ring position rather than eat
+				// the next packet's header.
+				self->fRxBadAt = self->fRingHead + 1;
 			}
 			uint32_t head = self->fRingHead;
 			if (head - self->fRingTail >= kRingSize) {
@@ -285,14 +297,12 @@ BCM43430Bluetooth::flushRx(void)
 {
 	// Ask the worker to drop everything received so far and reset the
 	// deframer, then wait for it (it owns fRingTail).
-	fRingFlush = fRingHead;
-	__atomic_thread_fence(__ATOMIC_SEQ_CST);
-	fFlushPending = true;
+	__atomic_store_n(&fFlushPending, true, __ATOMIC_RELEASE);
 	IOLockLock(fEventLock);
 	fWake = true;
 	IOLockWakeup(fEventLock, (void *)&fWake, true);
 	IOLockUnlock(fEventLock);
-	for (int i = 0; i < 100 && fFlushPending; i++) {
+	for (int i = 0; i < 100 && __atomic_load_n(&fFlushPending, __ATOMIC_ACQUIRE); i++) {
 		IOSleep(1);
 	}
 }
@@ -324,11 +334,13 @@ BCM43430Bluetooth::threadMain(void)
 void
 BCM43430Bluetooth::deframe(void)
 {
-	if (fFlushPending) {
-		fRingTail = fRingFlush;
+	if (__atomic_load_n(&fFlushPending, __ATOMIC_ACQUIRE)) {
+		// Flush to the current head, never to a saved value: the worker may
+		// already have consumed past what flushRx() saw, and moving the
+		// tail backwards would replay those bytes.
+		fRingTail = fRingHead;
 		fPktType = 0;
-		__atomic_thread_fence(__ATOMIC_SEQ_CST);
-		fFlushPending = false;
+		__atomic_store_n(&fFlushPending, false, __ATOMIC_RELEASE);
 	}
 	uint32_t head = fRingHead;
 	__atomic_thread_fence(__ATOMIC_ACQUIRE);
@@ -336,6 +348,11 @@ BCM43430Bluetooth::deframe(void)
 		uint8_t b = fRing[fRingTail % kRingSize];
 		fRingTail++;
 		fRxBytes++;
+		if (fRingTail == fRxBadAt && fPktType != 0) {
+			fResyncs++;
+			fPktType = 0;
+			continue;
+		}
 		if (fPktType == 0) {
 			// The controller sends only events and ACL data; SCO is unused
 			// and commands never come this way.
@@ -471,8 +488,14 @@ BCM43430Bluetooth::sendCommand(uint16_t opcode, const void *params, uint8_t plen
 	fResp = NULL;
 	fRespReady = false;
 	if (!ok) {
-		// A lost response must not leave the controller looking busy.
+		// A lost response must not leave the controller looking busy, and
+		// a half-received packet must not swallow the next one. (Project
+		// choice; Linux's hci_core.c command timeout similarly restores
+		// the command credit.)
 		fCmdCredits = 1;
+		__atomic_store_n(&fFlushPending, true, __ATOMIC_RELEASE);
+		fWake = true;
+		IOLockWakeup(fEventLock, (void *)&fWake, true);
 	}
 	IOLockUnlock(fEventLock);
 	IOLockUnlock(fCmdLock);
@@ -566,8 +589,12 @@ BCM43430Bluetooth::bringUp(void)
 		setError("firmware refused BT_ON (expander GPIO %u)", kExpGpioBtOn);
 		goto out;
 	}
-	IOSleep(10);
-	BCM2837Mailbox::setExpGPIO(kExpGpioBtOn, true);
+	IOSleep(10);    // project choice: Linux's power-off path has no fixed wait
+	if (!BCM2837Mailbox::setExpGPIO(kExpGpioBtOn, true)) {
+		setError("firmware refused BT_ON high");
+		r = kIOReturnError;
+		goto out;
+	}
 	IOSleep(120);
 	flushRx();
 	IOLockLock(fEventLock);
@@ -599,6 +626,13 @@ BCM43430Bluetooth::bringUp(void)
 	IOSleep(100);   // btbcm_finalize() -> btbcm_reset()
 
 	if (fOperBaud != kInitBaud) {
+		// Check the host can do the speed before telling the controller.
+		uint64_t q = ((uint64_t)fUartClockHz * 4 + fOperBaud / 2) / fOperBaud;
+		if ((q >> 6) == 0 || (q >> 6) > 0xffff) {
+			setError("no PL011 divisor for %u baud from a %u Hz clock", fOperBaud, fUartClockHz);
+			r = kIOReturnUnsupported;
+			goto out;
+		}
 		// bcm_set_baudrate(): Update_UART_Baud_Rate {le16 0, le32 baud};
 		// 0xfc45 is only for speeds above 3 Mbaud (hci_bcm.c:185).
 		uint8_t p[6] = { 0, 0, (uint8_t)fOperBaud, (uint8_t)(fOperBaud >> 8),
@@ -614,7 +648,8 @@ BCM43430Bluetooth::bringUp(void)
 	}
 
 	// Smoke check at the new speed. Linux adds no delay after the switch
-	// (hci_bcm.c:624-626); retry once in case the first command was early.
+	// (hci_bcm.c:624-626); the one retry is a project choice, in case the
+	// first command went out while the controller was still switching.
 	r = cmdStatusByte(kOpReadLocalVersion, NULL, 0, resp, 500);
 	if (r != kIOReturnSuccess) {
 		IOSleep(20);
@@ -632,7 +667,12 @@ BCM43430Bluetooth::bringUp(void)
 		fLmpSubversion = get2(resp->data + 12);
 	}
 
-	if ((r = cmdStatusByte(kOpReadBdaddr, NULL, 0, resp)) != kIOReturnSuccess || resp->len < 12) {
+	if ((r = cmdStatusByte(kOpReadBdaddr, NULL, 0, resp)) != kIOReturnSuccess) {
+		goto out;
+	}
+	if (resp->len < 12) {
+		setError("short Read_BD_ADDR reply (%u bytes)", resp->len);
+		r = kIOReturnError;
 		goto out;
 	}
 	for (int i = 0; i < 6; i++) {
@@ -648,7 +688,8 @@ BCM43430Bluetooth::bringUp(void)
 		uint8_t mac[6];
 		if ((memcmp(fBdaddr, def1, 6) == 0 || memcmp(fBdaddr, def2, 6) == 0) &&
 		    BCM2837Mailbox::getBoardMACAddress(mac)) {
-			mac[5]++;
+			for (int i = 5; i >= 3 && ++mac[i] == 0; i--) {
+			}
 			uint8_t le[6];
 			for (int i = 0; i < 6; i++) {
 				le[i] = mac[5 - i];
@@ -692,6 +733,12 @@ BCM43430Bluetooth::bringUp(void)
 	    fHciVersion, fHciRevision, fLmpVersion, fLmpSubversion, fName);
 	r = kIOReturnSuccess;
 out:
+	if (r != kIOReturnSuccess) {
+		// Leave it off, as Linux does when setup fails.
+		writeReg(kRegIMSC, 0);
+		writeReg(kRegCR, 0);
+		BCM2837Mailbox::setExpGPIO(kExpGpioBtOn, false);
+	}
 	IOFree(resp, sizeof(bt_packet));
 	return r;
 }

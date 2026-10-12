@@ -79,7 +79,12 @@ BCM43430BluetoothUserClient::externalMethod(uint32_t selector, IOExternalMethodA
 		NEED_IN(bt_command);
 		NEED_OUT(bt_packet);
 		const bt_command *c = (const bt_command *)args->structureInput;
-		return fDriver->userCommand(c, (bt_packet *)args->structureOutput);
+		// Under fOpLock, like every WiFi operation: a command must never go
+		// out in the middle of up()'s power cycle, patch or speed switch.
+		IOLockLock(fDriver->fOpLock);
+		r = fDriver->userCommand(c, (bt_packet *)args->structureOutput);
+		IOLockUnlock(fDriver->fOpLock);
+		return r;
 	}
 	case kBtMethodReadEvent:
 		NEED_OUT(bt_packet);

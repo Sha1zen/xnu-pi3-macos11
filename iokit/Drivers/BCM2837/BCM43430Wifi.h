@@ -29,6 +29,7 @@
 #include <IOKit/network/IOEthernetController.h>
 #include <IOKit/network/IOEthernetInterface.h>
 #include <IOKit/network/IONetworkMedium.h>
+#include <IOKit/network/IOOutputQueue.h>
 #include <IOKit/IOLocks.h>
 #include <kern/thread.h>
 

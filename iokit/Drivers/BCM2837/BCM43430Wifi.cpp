@@ -1714,6 +1714,13 @@ BCM43430Wifi::setPower(bool on)
 	} else {
 		leave();
 		r = wlcmdint(WLC_DOWN, 1);
+		if (r != kIOReturnSuccess) {
+			// Seen once on a real Pi, the first off right after a scan and the
+			// disassociate (status not captured; wlcmd() logs it). A second try
+			// a moment later has always worked.
+			IOSleep(200);
+			r = wlcmdint(WLC_DOWN, 1);
+		}
 		if (r == kIOReturnSuccess) {
 			fRadioOff = true;
 		}

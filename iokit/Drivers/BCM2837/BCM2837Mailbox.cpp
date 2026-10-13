@@ -635,9 +635,8 @@ BCM2837Mailbox::setExpGPIO(unsigned line, bool high)
 	// rpi_exp_gpio_dir_out() (gpio-raspberrypi-exp.c): Linux requests the
 	// BT shutdown line as an output (GPIOD_OUT_LOW), which configures it
 	// with SET_GPIO_CONFIG {gpio, direction 1, polarity (kept from
-	// GET_GPIO_CONFIG), term_en 0, term_pull_up 0, state}. A bare
-	// SET_GPIO_STATE on a line still configured as an input is refused by
-	// the firmware (seen on a real Pi 3B, firmware Aug 2026).
+	// GET_GPIO_CONFIG), term_en 0, term_pull_up 0, state}. Done the same
+	// way here so the line is an output whatever the firmware left it as.
 	uint32_t resp = 0;
 	uint32_t get[5] = { 128 + line, 0, 0, 0, 0 };
 	uint32_t polarity = 0;

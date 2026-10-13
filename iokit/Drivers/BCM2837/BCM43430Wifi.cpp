@@ -88,6 +88,7 @@ enum {
 	// WLC ioctls (brcmfmac fwil.h BRCMF_C_*)
 	WLC_UP           = 2,
 	WLC_DOWN         = 3,
+	WLC_GET_RATE     = 12,    // fwil.h BRCMF_C_GET_RATE, 500 kbps units
 	WLC_SET_PROMISC  = 10,
 	WLC_SET_INFRA    = 20,
 	WLC_SET_AUTH     = 22,
@@ -96,7 +97,6 @@ enum {
 	WLC_DISASSOC     = 52,
 	WLC_SET_PM       = 86,
 	WLC_GET_RSSI     = 127,
-	WLC_GET_RATE     = 12,    // fwil.h BRCMF_C_GET_RATE, 500 kbps units
 	WLC_GET_BSS_INFO = 136,   // fwil.h BRCMF_C_GET_BSS_INFO
 	WLC_SET_SCAN_CHANNEL_TIME = 185,
 	WLC_SET_SCAN_UNASSOC_TIME = 187,
@@ -676,6 +676,11 @@ BCM43430Wifi::uploadBegin(void)
 {
 	if (fState == kWifiStateUp) {
 		setError("firmware already running; reboot to load it again");
+		return kIOReturnBusy;
+	}
+	if (fState == kWifiStateLoading) {
+		// Another client (the boot job) is mid-upload; starting over would
+		// reset the chip under it.
 		return kIOReturnBusy;
 	}
 	if (fState == kWifiStateNone) {
@@ -1674,7 +1679,9 @@ BCM43430Wifi::join(const wifi_join *req)
 		setError("join \"%s\" %s", ssid, timedOut ? "timed out" : "failed");
 	}
 	wlcmd(WLC_DISASSOC, true, NULL, 0, NULL, 0);
-	return kIOReturnError;
+	// The associated-but-never-keyed case gets its own code, so a client can
+	// tell "wrong passphrase" (ask again) from "not found / no answer".
+	return (result <= 0 && wpa) ? kIOReturnNotPermitted : kIOReturnError;
 }
 
 IOReturn
@@ -1695,10 +1702,12 @@ BCM43430Wifi::leave(void)
 IOReturn
 BCM43430Wifi::setPower(bool on)
 {
-	// Radio off/on with the firmware kept loaded, as brcmfmac does around
-	// interface down/up: BRCMF_C_DOWN / BRCMF_C_UP with 1 (fwil.h:15-16;
-	// cfg80211.c:5238, :5280). Off drops the association first, so the
-	// interface sees the link go down.
+	// Radio off/on with the firmware kept loaded: this driver's own choice of
+	// mechanism. The commands are BRCMF_C_DOWN / BRCMF_C_UP with 1 (fwil.h:15-16),
+	// which brcmfmac itself sends around reconfiguring the radio, e.g. in
+	// brcmf_cfg80211_start_ap() (raspberrypi/linux 4103a989a461, cfg80211.c:5238,
+	// :5280). Off drops the association first, so the interface sees the link
+	// go down.
 	if (fState != kWifiStateUp) {
 		return kIOReturnNotReady;
 	}
@@ -1770,7 +1779,7 @@ BCM43430Wifi::getStatus(wifi_status *out)
 			put4(bi, kBssBuf);
 			if (wlcmd(WLC_GET_BSS_INFO, false, bi, kBssBuf, bi, kBssBuf) == kIOReturnSuccess) {
 				const uint8_t *b = bi + 4;
-				out->channel = get2(b + 72) & 0xFF;
+				out->channel = get2(b + 72) & 0xFF;   // chanspec's channel; the 43430 runs HT20
 				out->noise = (int8_t)b[80];
 				out->ht = b[81] ? 1 : 0;
 			}

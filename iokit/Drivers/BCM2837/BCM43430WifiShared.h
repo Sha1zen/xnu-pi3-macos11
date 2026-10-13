@@ -15,7 +15,7 @@ enum {
 	kWifiMethodUploadChunk = 1,  // scalar in: type, offset; struct in: <= kWifiChunkMax bytes
 	kWifiMethodBoot        = 2,  // no args: NVRAM, start CPU, CLM, init; attaches the interface
 	kWifiMethodScan        = 3,  // struct out: wifi_scan_results (blocks up to ~10 s)
-	kWifiMethodJoin        = 4,  // struct in: wifi_join (blocks up to ~20 s)
+	kWifiMethodJoin        = 4,  // struct in: wifi_join (blocks up to ~20 s); kIOReturnNotPermitted = WPA2 handshake failed (wrong passphrase)
 	kWifiMethodLeave       = 5,  // no args
 	kWifiMethodStatus      = 6,  // struct out: wifi_status
 	kWifiMethodPower       = 7,  // scalar in: 1 = radio on (WLC_UP), 0 = off (disassociate, WLC_DOWN)

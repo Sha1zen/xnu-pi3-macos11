@@ -96,6 +96,8 @@ enum {
 	WLC_DISASSOC     = 52,
 	WLC_SET_PM       = 86,
 	WLC_GET_RSSI     = 127,
+	WLC_GET_RATE     = 12,    // fwil.h BRCMF_C_GET_RATE, 500 kbps units
+	WLC_GET_BSS_INFO = 136,   // fwil.h BRCMF_C_GET_BSS_INFO
 	WLC_SET_SCAN_CHANNEL_TIME = 185,
 	WLC_SET_SCAN_UNASSOC_TIME = 187,
 	WLC_GET_VAR      = 262,
@@ -1745,6 +1747,31 @@ BCM43430Wifi::getStatus(wifi_status *out)
 		if (wlcmd(WLC_GET_RSSI, false, scb, sizeof(scb), scb, sizeof(scb)) == kIOReturnSuccess) {
 			out->rssi = (int32_t)get4(scb);
 		}
+		uint32_t rate = 0;
+		if (wlgetint(WLC_GET_RATE, &rate) == kIOReturnSuccess) {
+			out->rate_kbps = rate * 500;
+		}
+		// brcmf_update_bss_info() (cfg80211.c): the first word is the buffer
+		// length, the reply is a brcmf_bss_info_le after it. Field offsets
+		// as in handleScanResult(): chanspec 72, RSSI 78, then phy_noise 80
+		// and n_cap 81 (fwil_types.h). 1536 bytes keep the request inside
+		// one control frame (kRxMax).
+		const uint32_t kBssBuf = 1536;
+		uint8_t *bi = (uint8_t *)IOMalloc(kBssBuf);
+		if (bi != NULL) {
+			bzero(bi, kBssBuf);
+			put4(bi, kBssBuf);
+			if (wlcmd(WLC_GET_BSS_INFO, false, bi, kBssBuf, bi, kBssBuf) == kIOReturnSuccess) {
+				const uint8_t *b = bi + 4;
+				out->channel = get2(b + 72) & 0xFF;
+				out->noise = (int8_t)b[80];
+				out->ht = b[81] ? 1 : 0;
+			}
+			IOFree(bi, kBssBuf);
+		}
+		IOLockLock(fEventLock);
+		out->security = fJoinWpa ? kWifiSecWPA2 : 0;
+		IOLockUnlock(fEventLock);
 	}
 }
 

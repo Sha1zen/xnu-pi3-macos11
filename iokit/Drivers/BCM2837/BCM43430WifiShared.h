@@ -76,6 +76,12 @@ typedef struct {
 	char     fwversion[128];
 	char     lasterror[96];
 	uint32_t radio_off;    // 1 after Power(0): firmware loaded, radio down
+	// The rest are filled only while associated (GET_BSS_INFO, GET_RATE).
+	uint32_t channel;      // control channel (all 2.4 GHz on the 43430)
+	int32_t  noise;        // dBm, 0 if unknown
+	uint32_t rate_kbps;    // current transmit rate
+	uint32_t ht;           // 1 if the BSS is 802.11n capable
+	uint32_t security;     // kWifiSecWPA2 for a WPA2-PSK join, 0 for an open one
 } wifi_status;
 
 #endif /* _BCM43430WIFISHARED_H */

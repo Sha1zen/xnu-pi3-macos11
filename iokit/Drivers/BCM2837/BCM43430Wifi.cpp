@@ -87,6 +87,7 @@ enum {
 
 	// WLC ioctls (brcmfmac fwil.h BRCMF_C_*)
 	WLC_UP           = 2,
+	WLC_DOWN         = 3,
 	WLC_SET_PROMISC  = 10,
 	WLC_SET_INFRA    = 20,
 	WLC_SET_AUTH     = 22,
@@ -154,6 +155,7 @@ BCM43430Wifi::init(OSDictionary *properties)
 	fNvramLen = fClmLen = 0;
 	bzero(fMAC, sizeof(fMAC));
 	fFwVersion[0] = fLastError[0] = 0;
+	fRadioOff = false;
 	fTxSeq = fTxWindow = fFcMask = 0;
 	fCtlWaiting = false;
 	fReqId = 0;
@@ -816,6 +818,7 @@ BCM43430Wifi::boot(void)
 		fTxSeq = 0;
 		fTxWindow = 4;
 		fFcMask = 0;
+		fRadioOff = false;   // a fresh firmware boots with the radio up (wlInit's WLC_UP)
 		fState = kWifiStateUp;
 	} else {
 		fState = kWifiStateFailed;
@@ -1498,7 +1501,7 @@ BCM43430Wifi::wlInit(void)
 IOReturn
 BCM43430Wifi::scan(wifi_scan_results *out)
 {
-	if (fState != kWifiStateUp) {
+	if (fState != kWifiStateUp || fRadioOff) {
 		return kIOReturnNotReady;
 	}
 	IOLockLock(fEventLock);
@@ -1552,7 +1555,7 @@ BCM43430Wifi::scan(wifi_scan_results *out)
 IOReturn
 BCM43430Wifi::join(const wifi_join *req)
 {
-	if (fState != kWifiStateUp) {
+	if (fState != kWifiStateUp || fRadioOff) {
 		return kIOReturnNotReady;
 	}
 	char ssid[33], pass[65];
@@ -1687,6 +1690,36 @@ BCM43430Wifi::leave(void)
 	return r;
 }
 
+IOReturn
+BCM43430Wifi::setPower(bool on)
+{
+	// Radio off/on with the firmware kept loaded, as brcmfmac does around
+	// interface down/up: BRCMF_C_DOWN / BRCMF_C_UP with 1 (fwil.h:15-16;
+	// cfg80211.c:5238, :5280). Off drops the association first, so the
+	// interface sees the link go down.
+	if (fState != kWifiStateUp) {
+		return kIOReturnNotReady;
+	}
+	if (on == !fRadioOff) {
+		return kIOReturnSuccess;
+	}
+	IOReturn r;
+	if (on) {
+		r = wlcmdint(WLC_UP, 1);
+		if (r == kIOReturnSuccess) {
+			fRadioOff = false;
+		}
+	} else {
+		leave();
+		r = wlcmdint(WLC_DOWN, 1);
+		if (r == kIOReturnSuccess) {
+			fRadioOff = true;
+		}
+	}
+	IOLog("BCM43430Wifi: radio %s%s\n", on ? "on" : "off", r == kIOReturnSuccess ? "" : " failed");
+	return r;
+}
+
 void
 BCM43430Wifi::getStatus(wifi_status *out)
 {
@@ -1702,6 +1735,7 @@ BCM43430Wifi::getStatus(wifi_status *out)
 	out->chiprev = fChipRev;
 	strlcpy(out->fwversion, fFwVersion, sizeof(out->fwversion));
 	strlcpy(out->lasterror, fLastError, sizeof(out->lasterror));
+	out->radio_off = fRadioOff ? 1 : 0;
 	if (out->associated) {
 		// brcmfmac fwil_types.h brcmf_scb_val_le {__le32 val; u8 ea[6]},
 		// not packed, so sizeof is 12; the firmware rejects 10 bytes with

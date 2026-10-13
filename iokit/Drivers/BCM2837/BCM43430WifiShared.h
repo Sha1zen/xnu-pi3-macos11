@@ -18,6 +18,7 @@ enum {
 	kWifiMethodJoin        = 4,  // struct in: wifi_join (blocks up to ~20 s)
 	kWifiMethodLeave       = 5,  // no args
 	kWifiMethodStatus      = 6,  // struct out: wifi_status
+	kWifiMethodPower       = 7,  // scalar in: 1 = radio on (WLC_UP), 0 = off (disassociate, WLC_DOWN)
 	kWifiMethodCount
 };
 
@@ -74,6 +75,7 @@ typedef struct {
 	uint32_t chiprev;
 	char     fwversion[128];
 	char     lasterror[96];
+	uint32_t radio_off;    // 1 after Power(0): firmware loaded, radio down
 } wifi_status;
 
 #endif /* _BCM43430WIFISHARED_H */

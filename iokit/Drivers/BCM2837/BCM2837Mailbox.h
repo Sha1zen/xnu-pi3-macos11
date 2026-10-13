@@ -147,7 +147,8 @@ public:
 	 * (property tags 0x00030043 GET_GPIO_CONFIG and 0x00038043
 	 * SET_GPIO_CONFIG; RPI_EXP_GPIO_BASE 128). On the Pi 3B line 0 is BT_ON
 	 * and 1 is WL_ON (bcm2837-rpi-3-b.dts gpio-line-names). The firmware
-	 * overwrites the first request word with a status, 0 = success.
+	 * overwrites the first request word with a status, 0 = success; the
+	 * tag's own response bit is not checked (see the .cpp).
 	 */
 	static bool setExpGPIO(unsigned line, bool high);
 

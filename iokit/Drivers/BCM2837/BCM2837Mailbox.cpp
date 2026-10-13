@@ -641,7 +641,7 @@ BCM2837Mailbox::setExpGPIO(unsigned line, bool high)
 	uint32_t resp = 0;
 	uint32_t get[5] = { 128 + line, 0, 0, 0, 0 };
 	uint32_t polarity = 0;
-	if (propertyTagWords(0x00030043, get, 5, &resp) && (resp & (1U << 31)) && get[0] == 0) {
+	if (propertyTagWords(0x00030043, get, 5, &resp) && get[0] == 0) {
 		polarity = get[2];
 	}
 	uint32_t set[6] = { 128 + line, 1, polarity, 0, 0, high ? 1U : 0U };
@@ -649,7 +649,12 @@ BCM2837Mailbox::setExpGPIO(unsigned line, bool high)
 		IOLog("BCM2837Mailbox: expander GPIO %u: mailbox call failed\n", line);
 		return false;
 	}
-	if (!(resp & (1U << 31)) || set[0] != 0) {
+	// Only the message-level code (checked in mailboxCall()) and the status
+	// word count, as in Linux: rpi_firmware_property_list() checks buf[1]
+	// alone (drivers/firmware/raspberrypi.c:121), never the tag's response
+	// bit, which this firmware leaves 0 for these tags (seen on a real Pi
+	// 3B, firmware Aug 2026: code 0, status 0, line switched).
+	if (set[0] != 0) {
 		IOLog("BCM2837Mailbox: expander GPIO %u: SET_GPIO_CONFIG refused (code %#x, status %#x)\n",
 		    line, resp, set[0]);
 		return false;

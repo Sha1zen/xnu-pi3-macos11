@@ -23,6 +23,7 @@ PRIVATE_KERNELFILES = \
 	H11.h \
 	H13.h \
 	BCM2837.h \
+	QEMU_VIRT.h \
 	spr_locks.h
 
 
@@ -59,6 +60,7 @@ DATAFILES = \
 	H11.h \
 	H13.h \
 	BCM2837.h \
+	QEMU_VIRT.h \
 	spr_locks.h
 
 

@@ -628,6 +628,63 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) dockchannel_uart_seri
 #endif /* DOCKCHANNEL_UART */
 
 /****************************************************************************/
+#ifdef  QEMU_PL011_UART
+/*
+ * PL011 polled console for the QEMU 'virt' machine (and for anything else
+ * with an AMBA PL011 behind the 'uart0' Device Tree node). Registers come
+ * from the Device Tree at serial_init() time; there is no setup needed
+ * beyond MMU mapping — bootloader/XBL/QEMU has UART clocks up.
+ */
+static int
+qemu_pl011_tr0(void)
+{
+	/* FR bit 5 (TXFF) = transmit FIFO full; ready when not full. */
+	return ((*(volatile unsigned int *) (uart_base + 0x18)) & (1 << 5)) == 0;
+}
+
+static int
+qemu_pl011_td0(int c)
+{
+	(*(volatile unsigned int *) uart_base) = (unsigned int) c;
+	return 0;
+}
+
+static int
+qemu_pl011_rr0(void)
+{
+	/* FR bit 4 (RXFE) = receive FIFO empty; data available when not empty. */
+	return ((*(volatile unsigned int *) (uart_base + 0x18)) & (1 << 4)) == 0;
+}
+
+static int
+qemu_pl011_rd0(void)
+{
+	return (int) (*(volatile unsigned int *) uart_base) & 0xff;
+}
+
+static void
+qemu_pl011_uart_init(void)
+{
+}
+
+static void
+qemu_pl011_uart_set_baud_rate(__unused int unit, __unused uint32_t baud_rate)
+{
+}
+
+SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) qemu_pl011_serial_functions =
+{
+	.uart_init = qemu_pl011_uart_init,
+	.uart_set_baud_rate = qemu_pl011_uart_set_baud_rate,
+	.tr0 = qemu_pl011_tr0,
+	.td0 = qemu_pl011_td0,
+	.rr0 = qemu_pl011_rr0,
+	.rd0 = qemu_pl011_rd0
+};
+
+#endif /* QEMU_PL011_UART */
+
+/****************************************************************************/
 #ifdef  PI3_UART
 vm_offset_t pi3_gpio_base_vaddr = 0;
 vm_offset_t pi3_aux_base_vaddr = 0;
@@ -865,6 +922,18 @@ serial_init(void)
 		}
 	}
 #endif /* S3CUART */
+
+#ifdef QEMU_PL011_UART
+	/*
+	 * QEMU 'virt' PL011 early console. The generic DT walk below already
+	 * resolved uart_base from the 'uart0' node; register the polled
+	 * PL011 functions unless an early driver (dcc/shmcon/dockchannel/PI3)
+	 * already claimed the console.
+	 */
+	if (gPESF == NULL && uart_base != 0) {
+		register_serial_functions(&qemu_pl011_serial_functions);
+	}
+#endif /* QEMU_PL011_UART */
 
 	if (gPESF == NULL) {
 		return 0;

@@ -119,6 +119,16 @@ pe_identify_machine(boot_args * bootArgs)
 				continue;
 			}
 
+			/*
+			 * A 4-byte property is read as uint32_t. `value` is an
+			 * unsigned long pointer, 8 bytes on arm64, so `*value` read the
+			 * next property's first 4 bytes into the high word: with a
+			 * 4-byte timebase-frequency of 19200000 (the Pi 3's 19.2 MHz)
+			 * the kernel's divisor (truncated to 32 bits in
+			 * timebase_callback) was right but mach_timebase_info came out
+			 * 390625/8396108, so every userland tick<->ns conversion was
+			 * ~1100x off (iokit, 2026-10-17).
+			 */
 			/* Find the time base frequency first. */
 			if (SecureDTGetProperty(cpu, "timebase-frequency", (void const **)&value, &size) == kSuccess) {
 				/*
@@ -129,7 +139,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.timebase_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.timebase_frequency_hz = *value;
+					gPEClockFrequencyInfo.timebase_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			gPEClockFrequencyInfo.dec_clock_rate_hz = gPEClockFrequencyInfo.timebase_frequency_hz;
@@ -139,7 +149,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.bus_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.bus_frequency_hz = *value;
+					gPEClockFrequencyInfo.bus_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			gPEClockFrequencyInfo.bus_frequency_min_hz = gPEClockFrequencyInfo.bus_frequency_hz;
@@ -156,7 +166,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.mem_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.mem_frequency_hz = *value;
+					gPEClockFrequencyInfo.mem_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			gPEClockFrequencyInfo.mem_frequency_min_hz = gPEClockFrequencyInfo.mem_frequency_hz;
@@ -167,7 +177,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.prf_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.prf_frequency_hz = *value;
+					gPEClockFrequencyInfo.prf_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			gPEClockFrequencyInfo.prf_frequency_min_hz = gPEClockFrequencyInfo.prf_frequency_hz;
@@ -178,7 +188,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.fix_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.fix_frequency_hz = *value;
+					gPEClockFrequencyInfo.fix_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			/* Find the cpu frequency last. */
@@ -186,7 +196,7 @@ pe_identify_machine(boot_args * bootArgs)
 				if (size == 8) {
 					gPEClockFrequencyInfo.cpu_frequency_hz = *(unsigned long long const *)value;
 				} else {
-					gPEClockFrequencyInfo.cpu_frequency_hz = *value;
+					gPEClockFrequencyInfo.cpu_frequency_hz = *(uint32_t const *)value;
 				}
 			}
 			gPEClockFrequencyInfo.cpu_frequency_min_hz = gPEClockFrequencyInfo.cpu_frequency_hz;
